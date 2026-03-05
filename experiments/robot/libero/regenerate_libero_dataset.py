@@ -26,13 +26,20 @@ Usage:
 import argparse
 import json
 import os
-import time
 
 import h5py
 import numpy as np
 import robosuite.utils.transform_utils as T
 import tqdm
 from libero.libero import benchmark
+
+try:
+    import mujoco
+
+    MJ_GEOM_MESH = int(mujoco.mjtGeom.mjGEOM_MESH)
+except Exception:
+    # Fallback value used by MuJoCo enums for mesh geom type.
+    MJ_GEOM_MESH = 7
 
 from experiments.robot.libero.libero_utils import (
     get_libero_dummy_action,
@@ -41,6 +48,181 @@ from experiments.robot.libero.libero_utils import (
 
 
 IMAGE_RESOLUTION = 256
+
+
+def _get_robot_center_world(env, obs):
+    """Get a robot-centered world coordinate for mesh cropping."""
+    if "robot0_eef_pos" in obs:
+        return np.asarray(obs["robot0_eef_pos"], dtype=np.float32)
+
+    sim = env.sim
+    if hasattr(env, "robots") and len(env.robots) > 0:
+        root_body = getattr(env.robots[0].robot_model, "root_body", None)
+        if root_body is not None:
+            try:
+                body_id = sim.model.body_name2id(root_body)
+                return np.asarray(sim.data.body_xpos[body_id], dtype=np.float32)
+            except Exception:
+                pass
+
+    # Last-resort fallback: use first body world position.
+    return np.asarray(sim.data.body_xpos[0], dtype=np.float32)
+
+
+def _collect_mesh_triangles_in_cube(sim, cube_center, cube_size):
+    """Collect mesh triangles within a robot-centered 3D cube.
+
+    Returns a dict of arrays:
+        geom_ids: (M,)
+        face_indices: (M,) local face index inside each mesh asset
+        face_vertex_indices: (M, 3) local vertex indices in mesh asset
+        tri_local: (M, 3, 3) vertices in geom local coordinates (after mesh scale)
+        area: (M,) world-space triangle area
+    """
+    model, data = sim.model, sim.data
+
+    geom_type = np.asarray(model.geom_type)
+    geom_dataid = np.asarray(model.geom_dataid)
+    geom_xpos = np.asarray(data.geom_xpos)
+    geom_xmat = np.asarray(data.geom_xmat).reshape(-1, 3, 3)
+
+    mesh_vert = np.asarray(model.mesh_vert)
+    mesh_face = np.asarray(model.mesh_face, dtype=np.int32)
+    mesh_vertadr = np.asarray(model.mesh_vertadr, dtype=np.int32)
+    mesh_vertnum = np.asarray(model.mesh_vertnum, dtype=np.int32)
+    mesh_faceadr = np.asarray(model.mesh_faceadr, dtype=np.int32)
+    mesh_facenum = np.asarray(model.mesh_facenum, dtype=np.int32)
+    mesh_scale = np.asarray(model.mesh_scale) if hasattr(model, "mesh_scale") else None
+
+    half_extent = cube_size / 2.0
+
+    geom_ids_all = []
+    face_idx_all = []
+    face_vidx_all = []
+    tri_local_all = []
+    area_all = []
+
+    for geom_id in range(model.ngeom):
+        if int(geom_type[geom_id]) != MJ_GEOM_MESH:
+            continue
+
+        mesh_id = int(geom_dataid[geom_id])
+        if mesh_id < 0:
+            continue
+
+        vert_start = mesh_vertadr[mesh_id]
+        vert_num = mesh_vertnum[mesh_id]
+        face_start = mesh_faceadr[mesh_id]
+        face_num = mesh_facenum[mesh_id]
+        if vert_num == 0 or face_num == 0:
+            continue
+
+        verts_local = mesh_vert[vert_start : vert_start + vert_num].copy()
+        if mesh_scale is not None and len(mesh_scale) > mesh_id:
+            verts_local = verts_local * mesh_scale[mesh_id]
+
+        faces_local = mesh_face[face_start : face_start + face_num].copy()
+        tri_local = verts_local[faces_local]  # (F, 3, 3)
+
+        # Transform local -> world by current geom pose.
+        rotation = geom_xmat[geom_id]
+        translation = geom_xpos[geom_id]
+        tri_world = tri_local @ rotation.T + translation
+
+        tri_centers = tri_world.mean(axis=1)
+        in_cube = np.all(np.abs(tri_centers - cube_center[None, :]) <= half_extent, axis=1)
+        if not np.any(in_cube):
+            continue
+
+        tri_world_kept = tri_world[in_cube]
+        edge_1 = tri_world_kept[:, 1] - tri_world_kept[:, 0]
+        edge_2 = tri_world_kept[:, 2] - tri_world_kept[:, 0]
+        tri_area = 0.5 * np.linalg.norm(np.cross(edge_1, edge_2), axis=1)
+
+        kept_face_indices = np.nonzero(in_cube)[0].astype(np.int32)
+        kept_face_vidx = faces_local[in_cube].astype(np.int32)
+
+        geom_ids_all.append(np.full((kept_face_indices.shape[0],), geom_id, dtype=np.int32))
+        face_idx_all.append(kept_face_indices)
+        face_vidx_all.append(kept_face_vidx)
+        tri_local_all.append(tri_local[in_cube].astype(np.float32))
+        area_all.append(tri_area.astype(np.float64))
+
+    if len(area_all) == 0:
+        raise RuntimeError(
+            "No mesh triangles found in the robot-centered crop cube. "
+            "Try increasing `--point_cube_size` or verify mesh assets in environment."
+        )
+
+    return {
+        "geom_ids": np.concatenate(geom_ids_all, axis=0),
+        "face_indices": np.concatenate(face_idx_all, axis=0),
+        "face_vertex_indices": np.concatenate(face_vidx_all, axis=0),
+        "tri_local": np.concatenate(tri_local_all, axis=0),
+        "area": np.concatenate(area_all, axis=0),
+    }
+
+
+def _sample_point_tracks_from_mesh(sim, env, obs, n_points, cube_size, rng):
+    """Initialize point tracks by mesh-face sampling + barycentric coordinates.
+
+    This follows Pri4R-style initialization:
+      1) Crop mesh triangles inside robot-centered 3D cube.
+      2) Uniformly sample surface points over mesh faces (area-weighted).
+      3) Store face indices + barycentric coordinates for identity-consistent tracking.
+    """
+    center = _get_robot_center_world(env, obs)
+    mesh_data = _collect_mesh_triangles_in_cube(sim, center, cube_size)
+
+    areas = mesh_data["area"]
+    if np.sum(areas) <= 0:
+        raise RuntimeError("All candidate mesh face areas are zero; cannot sample track points.")
+
+    face_prob = areas / np.sum(areas)
+    sampled_face_ids = rng.choice(np.arange(len(face_prob)), size=n_points, replace=True, p=face_prob)
+
+    # Uniform point sampling on triangle surface via barycentric coordinates.
+    # See Turk 1990: use sqrt trick for uniform area sampling.
+    rand_1 = rng.random(n_points)
+    rand_2 = rng.random(n_points)
+    sqrt_rand_1 = np.sqrt(rand_1)
+    barycentric = np.stack(
+        [
+            1.0 - sqrt_rand_1,
+            sqrt_rand_1 * (1.0 - rand_2),
+            sqrt_rand_1 * rand_2,
+        ],
+        axis=1,
+    ).astype(np.float32)  # (Np, 3)
+
+    sampled_tri_local = mesh_data["tri_local"][sampled_face_ids]  # (Np, 3, 3)
+    sampled_local_points = np.sum(sampled_tri_local * barycentric[:, :, None], axis=1).astype(np.float32)  # (Np, 3)
+
+    return {
+        "geom_ids": mesh_data["geom_ids"][sampled_face_ids].astype(np.int32),
+        "face_indices": mesh_data["face_indices"][sampled_face_ids].astype(np.int32),
+        "face_vertex_indices": mesh_data["face_vertex_indices"][sampled_face_ids].astype(np.int32),
+        "barycentric": barycentric,
+        "local_points": sampled_local_points,
+    }
+
+
+def _track_points_world(sim, point_track_info):
+    """Track identity-consistent world points using stored barycentric local points."""
+    geom_ids = point_track_info["geom_ids"]  # (Np,)
+    local_points = point_track_info["local_points"]  # (Np, 3)
+
+    geom_xpos = np.asarray(sim.data.geom_xpos)  # (G, 3)
+    geom_xmat = np.asarray(sim.data.geom_xmat).reshape(-1, 3, 3)  # (G, 3, 3)
+
+    world_points = np.zeros_like(local_points, dtype=np.float32)
+    for geom_id in np.unique(geom_ids):
+        mask = geom_ids == geom_id
+        rotation = geom_xmat[geom_id]
+        translation = geom_xpos[geom_id]
+        world_points[mask] = (local_points[mask] @ rotation.T + translation).astype(np.float32)
+
+    return world_points
 
 
 def is_noop(action, prev_action=None, threshold=1e-4):
@@ -132,6 +314,18 @@ def main(args):
             robot_states = []
             agentview_images = []
             eye_in_hand_images = []
+            pointcloud_abs = []
+
+            # Pri4R-style 3D point track initialization on first frame.
+            episode_rng = np.random.default_rng(seed=args.point_seed + task_id * 100000 + i)
+            point_track_info = _sample_point_tracks_from_mesh(
+                sim=env.sim,
+                env=env,
+                obs=obs,
+                n_points=args.point_count,
+                cube_size=args.point_cube_size,
+                rng=episode_rng,
+            )
 
             # Replay original demo actions in environment and record observations
             for _, action in enumerate(orig_actions):
@@ -172,6 +366,10 @@ def main(args):
                 agentview_images.append(obs["agentview_image"])
                 eye_in_hand_images.append(obs["robot0_eye_in_hand_image"])
 
+                # Record identity-consistent point cloud in world coordinates.
+                curr_points_world = _track_points_world(env.sim, point_track_info)  # (Np, 3)
+                pointcloud_abs.append(curr_points_world)
+
                 # Execute demo action in environment
                 obs, reward, done, info = env.step(action.tolist())
 
@@ -182,6 +380,13 @@ def main(args):
                 rewards = np.zeros(len(actions)).astype(np.uint8)
                 rewards[-1] = 1
                 assert len(actions) == len(agentview_images)
+                assert len(pointcloud_abs) == len(actions)
+
+                pointcloud_abs_np = np.stack(pointcloud_abs, axis=0).astype(np.float32)  # (T, Np, 3)
+                if pointcloud_abs_np.shape[0] > 1:
+                    pointcloud_disp_np = (pointcloud_abs_np[1:] - pointcloud_abs_np[:-1]).astype(np.float32)  # (T-1, Np, 3)
+                else:
+                    pointcloud_disp_np = np.zeros((0, args.point_count, 3), dtype=np.float32)
 
                 ep_data_grp = grp.create_group(f"demo_{i}")
                 obs_grp = ep_data_grp.create_group("obs")
@@ -192,6 +397,12 @@ def main(args):
                 obs_grp.create_dataset("ee_ori", data=np.stack(ee_states, axis=0)[:, 3:])
                 obs_grp.create_dataset("agentview_rgb", data=np.stack(agentview_images, axis=0))
                 obs_grp.create_dataset("eye_in_hand_rgb", data=np.stack(eye_in_hand_images, axis=0))
+                obs_grp.create_dataset("pointcloud_abs", data=pointcloud_abs_np, dtype=np.float32)
+                obs_grp.create_dataset("pointcloud_disp", data=pointcloud_disp_np, dtype=np.float32)
+                obs_grp.create_dataset("point_track_geom_ids", data=point_track_info["geom_ids"], dtype=np.int32)
+                obs_grp.create_dataset("point_track_face_indices", data=point_track_info["face_indices"], dtype=np.int32)
+                obs_grp.create_dataset("point_track_face_vertex_indices", data=point_track_info["face_vertex_indices"], dtype=np.int32)
+                obs_grp.create_dataset("point_track_barycentric", data=point_track_info["barycentric"], dtype=np.float32)
                 ep_data_grp.create_dataset("actions", data=actions)
                 ep_data_grp.create_dataset("states", data=np.stack(states))
                 ep_data_grp.create_dataset("robot_states", data=np.stack(robot_states, axis=0))
@@ -243,6 +454,12 @@ if __name__ == "__main__":
                         help="Path to directory containing raw HDF5 dataset. Example: ./LIBERO/libero/datasets/libero_spatial", required=True)
     parser.add_argument("--libero_target_dir", type=str,
                         help="Path to regenerated dataset directory. Example: ./LIBERO/libero/datasets/libero_spatial_no_noops", required=True)
+    parser.add_argument("--point_count", type=int, default=1024,
+                        help="Number of tracked mesh-surface points per episode (Pri4R uses 1024).")
+    parser.add_argument("--point_cube_size", type=float, default=1.2,
+                        help="Robot-centered cube size (meters) used for mesh cropping at first frame.")
+    parser.add_argument("--point_seed", type=int, default=7,
+                        help="Random seed for mesh-face surface sampling.")
     args = parser.parse_args()
 
     # Start data regeneration
