@@ -1,7 +1,5 @@
 """ Adapted from https://github.com/dyson-ai/hdp/blob/main/rk_diffuser/models/pointnet.py """
 
-"""PointNet to handle the 3D point cloud."""
-
 import numpy as np
 import torch
 import torch.nn as nn
@@ -9,6 +7,7 @@ import torch.nn.functional as F
 import torch.nn.parallel
 import torch.utils.data
 from torch.autograd import Variable
+from diffusion_policy.common.pytorch_util import replace_submodules
 
 
 class STN3d(nn.Module):
@@ -44,11 +43,7 @@ class STN3d(nn.Module):
         x = self.fc3(x)
 
         iden = (
-            Variable(
-                torch.from_numpy(
-                    np.array([1, 0, 0, 0, 1, 0, 0, 0, 1]).astype(np.float32)
-                )
-            )
+            Variable(torch.from_numpy(np.array([1, 0, 0, 0, 1, 0, 0, 0, 1]).astype(np.float32)))
             .view(1, 9)
             .repeat(batchsize, 1)
         )
@@ -73,8 +68,11 @@ class STNkd(nn.Module):
         self.bn1 = nn.BatchNorm1d(64)
         self.bn2 = nn.BatchNorm1d(128)
         self.bn3 = nn.BatchNorm1d(1024)
-        self.bn4 = nn.BatchNorm1d(512)
-        self.bn5 = nn.BatchNorm1d(256)
+        # self.bn4 = nn.BatchNorm1d(512)
+        # self.bn5 = nn.BatchNorm1d(256)
+
+        self.bn4 = nn.LayerNorm(512)
+        self.bn5 = nn.LayerNorm(256)
 
         self.k = k
 
@@ -103,10 +101,12 @@ class STNkd(nn.Module):
 
 
 class PointNetfeat(nn.Module):
-    def __init__(self, feature_transform=False):
+    def __init__(self, input_channels: int, input_transform: bool, feature_transform=False):
         super(PointNetfeat, self).__init__()
-        self.stn = STN3d()
-        self.conv1 = torch.nn.Conv1d(3, 64, 1)
+        self.input_transform = input_transform
+        if self.input_transform:
+            self.stn = STNkd(k=input_channels)
+        self.conv1 = torch.nn.Conv1d(input_channels, 64, 1)
         self.conv2 = torch.nn.Conv1d(64, 128, 1)
         self.conv3 = torch.nn.Conv1d(128, 1024, 1)
         self.bn1 = nn.BatchNorm1d(64)
@@ -121,10 +121,14 @@ class PointNetfeat(nn.Module):
         if len(x.shape) == 4:
             x = x.view(b, -1, 3).permute(0, 2, 1).contiguous()
 
-        trans = self.stn(x)
-        x = x.transpose(2, 1)
-        x = torch.bmm(x, trans)
-        x = x.transpose(2, 1)
+        if self.input_transform:
+            trans = self.stn(x)
+            x = x.transpose(2, 1)
+            x = torch.bmm(x, trans)
+            x = x.transpose(2, 1)
+        else:
+            trans = None
+
         x = F.relu(self.bn1(self.conv1(x)))
 
         if self.feature_transform:
@@ -189,3 +193,49 @@ class PointNetDenseCls(nn.Module):
         x = F.log_softmax(x.view(-1, self.k), dim=-1)
         x = x.view(batchsize, n_pts, self.k)
         return x, trans, trans_feat
+
+
+class PointNetBackbone(nn.Module):
+    def __init__(
+        self,
+        embed_dim: int,
+        input_channels: int,
+        input_transform: bool,
+        use_group_norm: bool = False,
+        return_interm_features: bool = False,
+    ):
+        super().__init__()
+        assert input_channels in [3, 6], "Input channels must be 3 or 6"
+        self.return_interm_features = return_interm_features
+        self.backbone = nn.Sequential(
+            PointNetfeat(input_channels, input_transform),
+            nn.Mish(),
+            nn.Linear(1024, 512),
+            nn.Mish(),
+            nn.Linear(512, embed_dim),
+        )
+        if use_group_norm:
+            self.backbone = replace_submodules(
+                root_module=self.backbone,
+                predicate=lambda x: isinstance(x, nn.BatchNorm1d),
+                func=lambda x: nn.GroupNorm(
+                    num_groups=x.num_features // 16, num_channels=x.num_features
+                ),
+            )
+        return
+
+    def forward(self, pcd: torch.Tensor, robot_state_obs: torch.Tensor = None) -> torch.Tensor:
+        B = pcd.shape[0]
+        # Flatten the batch and time dimensions
+        pcd = pcd.float().reshape(-1, *pcd.shape[2:])
+        robot_state_obs = robot_state_obs.float().reshape(-1, *robot_state_obs.shape[2:])
+        # Permute [B, P, C] -> [B, C, P]
+        pcd = pcd.permute(0, 2, 1)
+        # Encode all point clouds (across time steps and batch size)
+        encoded_pcd = self.backbone(pcd)
+        nx = torch.cat([encoded_pcd, robot_state_obs], dim=1)
+        # Reshape back to the batch dimension. Now the features of each time step are concatenated
+        nx = nx.reshape(B, -1)
+        if self.return_interm_features:
+            return nx, encoded_pcd.reshape(B, -1)
+        return nx
