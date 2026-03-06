@@ -1,24 +1,100 @@
 # Setup Instructions
 
-## Set Up Conda Environment
+This guide is organized in layers so you can install only what you need:
+
+1. Base OpenVLA-OFT (required)
+2. LIBERO simulation and dataset regeneration (optional)
+3. Point-cloud backbones and point-tracking extensions (optional)
+4. Flash Attention training acceleration (optional, Linux recommended)
+
+Recommended versions for reproducibility:
+
+* Python `3.10.x`
+* PyTorch `2.2.0`
+
+## 1) Create Environment
 
 ```bash
-# Create and activate conda environment
 conda create -n openvla-oft python=3.10 -y
 conda activate openvla-oft
+python -m pip install --upgrade pip setuptools wheel
+```
 
-# Install PyTorch
-# Use a command specific to your machine: https://pytorch.org/get-started/locally/
-pip3 install torch torchvision torchaudio
+## 2) Install PyTorch First
 
-# Clone openvla-oft repo and pip install to download dependencies
+Install a PyTorch build that matches your CUDA/CPU setup:
+
+```bash
+# Example only. Pick the correct command for your machine:
+# https://pytorch.org/get-started/locally/
+pip install torch==2.2.0 torchvision==0.17.0 torchaudio==2.2.0
+```
+
+## 3) Install OpenVLA-OFT Core
+
+```bash
 git clone https://github.com/moojink/openvla-oft.git
 cd openvla-oft
 pip install -e .
+```
 
-# Install Flash Attention 2 for training (https://github.com/Dao-AILab/flash-attention)
-#   =>> If you run into difficulty, try `pip cache remove flash_attn` first
+## 4) Optional: LIBERO Simulation + Dataset Regeneration
+
+Use this if you run `run_libero_eval.py` or `regenerate_libero_dataset.py`.
+
+```bash
+# Install openvla-oft optional LIBERO dependencies
+pip install -e ".[libero]"
+
+# Install LIBERO repo itself
+git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git
+pip install -e LIBERO
+
+# Keep support packages aligned with project file
+pip install -r experiments/robot/libero/libero_requirements.txt
+```
+
+## 5) Optional: Point-Cloud Extensions
+
+Use this if you enable point backbones that require `pytorch3d` and `diffusion_policy`.
+
+```bash
+pip install -e ".[point]"
+```
+
+Notes:
+
+* `pytorch3d` wheels are platform/CUDA specific. If `pip install -e ".[point]"` fails, install a matching `pytorch3d` wheel manually, then rerun.
+* On Windows, `pytorch3d` installation may require extra steps or WSL/Linux.
+
+## 6) Optional: Flash Attention 2 (Training Speed)
+
+Install only if you need Flash Attention training acceleration.
+
+```bash
 pip install packaging ninja
-ninja --version; echo $?  # Verify Ninja --> should return exit code "0"
+ninja --version
 pip install "flash-attn==2.5.5" --no-build-isolation
 ```
+
+Notes:
+
+* Flash Attention build is best supported on Linux + NVIDIA CUDA toolchain.
+* If install fails, clear the build cache and retry:
+
+```bash
+pip cache remove flash_attn
+```
+
+## 7) Quick Import Checks
+
+Run these checks after installation to catch missing packages early:
+
+```bash
+python -c "import torch; print('torch', torch.__version__)"
+python -c "import transformers, tensorflow; print('core ok')"
+python -c "import h5py, mujoco, robosuite; print('libero deps ok')"
+python -c "import pytorch3d; print('pytorch3d ok')"
+```
+
+If you do not use LIBERO or point-cloud modules, you can skip the related checks.

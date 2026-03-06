@@ -1,4 +1,6 @@
 imageio[ffmpeg]
+h5py>=3.8.0
+mujoco>=2.3.3,<3.0.0
 robosuite==1.4.1
 bddl
 easydict

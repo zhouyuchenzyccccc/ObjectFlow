@@ -68,6 +68,19 @@ dev = [
     "pre-commit",
     "ruff>=0.2.2",
 ]
+libero = [
+    "h5py>=3.8.0",
+    "mujoco>=2.3.3,<3.0.0",
+    "robosuite==1.4.1",
+    "bddl",
+    "easydict",
+    "cloudpickle",
+    "gym",
+]
+point = [
+    "pytorch3d>=0.7.8",
+    "diffusion-policy @ git+https://github.com/real-stanford/diffusion_policy.git",
+]
 sagemaker = [
     "boto3",
     "sagemaker"

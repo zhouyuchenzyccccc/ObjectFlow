@@ -21,6 +21,9 @@ Set up a conda environment (see instructions in [SETUP.md](SETUP.md)).
 Clone and install the [LIBERO repo](https://github.com/Lifelong-Robot-Learning/LIBERO) and required packages:
 
 ```bash
+# Install openvla-oft LIBERO extras from the repo root
+pip install -e ".[libero]"
+
 git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git
 pip install -e LIBERO
 pip install -r experiments/robot/libero/libero_requirements.txt  # From openvla-oft base dir
