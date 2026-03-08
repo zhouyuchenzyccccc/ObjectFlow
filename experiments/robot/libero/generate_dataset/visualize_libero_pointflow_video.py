@@ -68,6 +68,14 @@ def _normalize_rgb_frames(rgb_frames: np.ndarray) -> np.ndarray:
     return np.clip(rgb_frames, 0, 255).astype(np.uint8)
 
 
+def _maybe_rotate_rgb_frames(rgb_frames: np.ndarray, rotate_180: bool) -> np.ndarray:
+    """Rotate RGB frames by 180 degrees when environment camera is upside down."""
+    if not rotate_180:
+        return rgb_frames
+    # Rotate across spatial axes H/W, keep time/channel axes unchanged.
+    return np.rot90(rgb_frames, k=2, axes=(1, 2)).copy()
+
+
 def _sample_points(
     point_abs: np.ndarray,
     point_disp: np.ndarray,
@@ -266,11 +274,12 @@ def main(args: argparse.Namespace) -> None:
 
     point_abs, point_disp, rgb_frames = _load_demo_data(hdf5_path, demo_key, args.rgb_key)
     rgb_frames = _normalize_rgb_frames(rgb_frames)
+    rgb_frames = _maybe_rotate_rgb_frames(rgb_frames, args.rotate_rgb_180)
     point_abs, point_disp = _sample_points(point_abs, point_disp, args.max_points, rng)
 
     print(f"Selected demo: {hdf5_path.name}:{demo_key}")
     print(f"Pointcloud shape: abs={point_abs.shape}, disp={point_disp.shape}")
-    print(f"RGB shape ({args.rgb_key}): {rgb_frames.shape}")
+    print(f"RGB shape ({args.rgb_key}): {rgb_frames.shape}, rotated_180={args.rotate_rgb_180}")
 
     frames = _render_frames(
         point_abs=point_abs,
@@ -325,6 +334,18 @@ if __name__ == "__main__":
         default="agentview_rgb",
         choices=["agentview_rgb", "eye_in_hand_rgb"],
         help="Which 2D observation stream to save from HDF5.",
+    )
+    parser.add_argument(
+        "--rotate_rgb_180",
+        action="store_true",
+        default=True,
+        help="Rotate RGB frames by 180 degrees before saving (default: enabled).",
+    )
+    parser.add_argument(
+        "--no_rotate_rgb_180",
+        action="store_false",
+        dest="rotate_rgb_180",
+        help="Disable 180-degree RGB rotation.",
     )
     parser.add_argument("--seed", type=int, default=7, help="Random seed for selecting one demo.")
     parser.add_argument("--max_points", type=int, default=1024, help="Maximum number of points rendered per frame.")

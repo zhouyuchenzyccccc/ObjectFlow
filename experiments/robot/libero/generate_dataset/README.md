@@ -112,6 +112,7 @@ python experiments/robot/libero/generate_dataset/visualize_libero_pointflow_vide
   --save_comparison \
   --output_comparison_video /inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/datasets/libero_object_no_noops/random_demo_compare.mp4 \
   --rgb_key agentview_rgb \
+  --rotate_rgb_180 \
   --seed 7 \
   --max_points 1024 \
   --arrow_stride 24 \
@@ -128,6 +129,8 @@ python experiments/robot/libero/generate_dataset/visualize_libero_pointflow_vide
 
 - `--seed`: controls which random demo is selected
 - `--rgb_key`: 2D stream key, choose from `agentview_rgb` or `eye_in_hand_rgb`
+- `--rotate_rgb_180`: rotate 2D RGB frames by 180 degrees before saving (default enabled)
+- `--no_rotate_rgb_180`: disable the 180-degree rotation
 - `--output_2d_video`: output path of corresponding LIBERO 2D video
 - `--save_comparison`: save side-by-side comparison video
 - `--output_comparison_video`: output path for side-by-side video
