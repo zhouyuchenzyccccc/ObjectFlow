@@ -1,4 +1,4 @@
-"""Render a random regenerated LIBERO demo as a point-flow video.
+"""Render a random regenerated LIBERO demo as point-flow and 2D videos.
 
 The script loads one random demo from regenerated LIBERO HDF5 files and writes a video
 showing how the scene point cloud evolves over time.
@@ -7,13 +7,14 @@ Usage:
     python experiments/robot/libero/generate_dataset/visualize_libero_pointflow_video.py \
         --dataset_dir /path/to/libero_object_no_noops \
         --output_video /path/to/random_demo_pointflow.mp4 \
+        --output_2d_video /path/to/random_demo_agentview.mp4 \
         --trail_stride 16 \
         --trail_len 25
 """
 
 import argparse
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import h5py
 import imageio.v2 as imageio
@@ -25,7 +26,7 @@ def _list_hdf5_files(dataset_dir: Path) -> List[Path]:
     return sorted(dataset_dir.glob("*_demo.hdf5"))
 
 
-def _collect_demo_refs(hdf5_files: List[Path]) -> List[Tuple[Path, str]]:
+def _collect_demo_refs(hdf5_files: List[Path], rgb_key: str) -> List[Tuple[Path, str]]:
     refs: List[Tuple[Path, str]] = []
     for hdf5_path in hdf5_files:
         with h5py.File(hdf5_path, "r") as f:
@@ -36,17 +37,35 @@ def _collect_demo_refs(hdf5_files: List[Path]) -> List[Tuple[Path, str]]:
                 if "obs" not in ep:
                     continue
                 obs = ep["obs"]
-                if "pointcloud_abs" in obs and "pointcloud_disp" in obs:
+                if "pointcloud_abs" in obs and "pointcloud_disp" in obs and rgb_key in obs:
                     refs.append((hdf5_path, demo_key))
     return refs
 
 
-def _load_demo_points(hdf5_path: Path, demo_key: str) -> Tuple[np.ndarray, np.ndarray]:
+def _load_demo_data(hdf5_path: Path, demo_key: str, rgb_key: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     with h5py.File(hdf5_path, "r") as f:
         obs = f["data"][demo_key]["obs"]
         point_abs = obs["pointcloud_abs"][()].astype(np.float32)  # (T, N, 3)
         point_disp = obs["pointcloud_disp"][()].astype(np.float32)  # (T-1, N, 3)
-    return point_abs, point_disp
+        rgb_frames = obs[rgb_key][()]  # (T, H, W, 3)
+    return point_abs, point_disp, rgb_frames
+
+
+def _normalize_rgb_frames(rgb_frames: np.ndarray) -> np.ndarray:
+    """Convert RGB frames to uint8, shape (T, H, W, 3)."""
+    if rgb_frames.ndim != 4 or rgb_frames.shape[-1] != 3:
+        raise ValueError(f"RGB frames must be shaped (T, H, W, 3), got {rgb_frames.shape}")
+
+    if rgb_frames.dtype == np.uint8:
+        return rgb_frames
+
+    if np.issubdtype(rgb_frames.dtype, np.floating):
+        # Handle float images in either [0, 1] or [0, 255].
+        max_val = float(np.max(rgb_frames)) if rgb_frames.size > 0 else 1.0
+        scale = 255.0 if max_val <= 1.0 else 1.0
+        return np.clip(rgb_frames * scale, 0, 255).astype(np.uint8)
+
+    return np.clip(rgb_frames, 0, 255).astype(np.uint8)
 
 
 def _sample_points(
@@ -189,27 +208,69 @@ def _write_video(frames: List[np.ndarray], output_video: Path, fps: int) -> None
         ) from exc
 
 
+def _resize_nearest(frame: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
+    """Resize image with nearest-neighbor interpolation using numpy only."""
+    src_h, src_w = frame.shape[:2]
+    if src_h == target_h and src_w == target_w:
+        return frame
+
+    row_idx = np.linspace(0, src_h - 1, target_h).astype(np.int32)
+    col_idx = np.linspace(0, src_w - 1, target_w).astype(np.int32)
+    return frame[row_idx][:, col_idx]
+
+
+def _build_side_by_side_frames(pointflow_frames: List[np.ndarray], rgb_frames: np.ndarray) -> List[np.ndarray]:
+    """Concatenate point-flow frame and 2D observation frame horizontally."""
+    if len(pointflow_frames) == 0:
+        return []
+
+    t_steps = min(len(pointflow_frames), rgb_frames.shape[0])
+    comparison_frames: List[np.ndarray] = []
+    for t in range(t_steps):
+        left = pointflow_frames[t]
+        right = rgb_frames[t]
+        right_resized = _resize_nearest(right, left.shape[0], left.shape[1])
+        merged = np.concatenate([left, right_resized], axis=1)
+        comparison_frames.append(merged)
+
+    return comparison_frames
+
+
 def main(args: argparse.Namespace) -> None:
     dataset_dir = Path(args.dataset_dir)
     output_video = Path(args.output_video)
+    output_2d_video = Path(args.output_2d_video) if args.output_2d_video else output_video.with_name(
+        f"{output_video.stem}_2d{output_video.suffix}"
+    )
+    output_comparison_video: Optional[Path]
+    if args.output_comparison_video:
+        output_comparison_video = Path(args.output_comparison_video)
+    elif args.save_comparison:
+        output_comparison_video = output_video.with_name(f"{output_video.stem}_compare{output_video.suffix}")
+    else:
+        output_comparison_video = None
 
     hdf5_files = _list_hdf5_files(dataset_dir)
     if not hdf5_files:
         raise FileNotFoundError(f"No '*_demo.hdf5' files found in: {dataset_dir}")
 
-    demo_refs = _collect_demo_refs(hdf5_files)
+    demo_refs = _collect_demo_refs(hdf5_files, args.rgb_key)
     if not demo_refs:
-        raise RuntimeError("No demos with pointcloud_abs/pointcloud_disp were found.")
+        raise RuntimeError(
+            f"No demos with pointcloud_abs/pointcloud_disp and rgb key '{args.rgb_key}' were found."
+        )
 
     rng = np.random.default_rng(args.seed)
     choice_idx = int(rng.integers(len(demo_refs)))
     hdf5_path, demo_key = demo_refs[choice_idx]
 
-    point_abs, point_disp = _load_demo_points(hdf5_path, demo_key)
+    point_abs, point_disp, rgb_frames = _load_demo_data(hdf5_path, demo_key, args.rgb_key)
+    rgb_frames = _normalize_rgb_frames(rgb_frames)
     point_abs, point_disp = _sample_points(point_abs, point_disp, args.max_points, rng)
 
     print(f"Selected demo: {hdf5_path.name}:{demo_key}")
     print(f"Pointcloud shape: abs={point_abs.shape}, disp={point_disp.shape}")
+    print(f"RGB shape ({args.rgb_key}): {rgb_frames.shape}")
 
     frames = _render_frames(
         point_abs=point_abs,
@@ -226,11 +287,45 @@ def main(args: argparse.Namespace) -> None:
     _write_video(frames, output_video, fps=args.fps)
     print(f"Saved video: {output_video}")
 
+    # Save corresponding LIBERO 2D demo frames for direct comparison.
+    rgb_list = [rgb_frames[t] for t in range(rgb_frames.shape[0])]
+    _write_video(rgb_list, output_2d_video, fps=args.fps)
+    print(f"Saved 2D video ({args.rgb_key}): {output_2d_video}")
+
+    if output_comparison_video is not None:
+        comparison_frames = _build_side_by_side_frames(frames, rgb_frames)
+        _write_video(comparison_frames, output_comparison_video, fps=args.fps)
+        print(f"Saved comparison video (3D|2D): {output_comparison_video}")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset_dir", type=str, required=True, help="Directory containing regenerated *_demo.hdf5 files.")
     parser.add_argument("--output_video", type=str, required=True, help="Output path, e.g. /tmp/demo.mp4 or /tmp/demo.gif")
+    parser.add_argument(
+        "--output_2d_video",
+        type=str,
+        default=None,
+        help="Output path for LIBERO 2D demo video. Default: <output_video_stem>_2d.<ext>",
+    )
+    parser.add_argument(
+        "--output_comparison_video",
+        type=str,
+        default=None,
+        help="Output path for side-by-side comparison video. Used when --save_comparison is set.",
+    )
+    parser.add_argument(
+        "--save_comparison",
+        action="store_true",
+        help="If set, also save side-by-side comparison video (left=3D point-flow, right=2D RGB).",
+    )
+    parser.add_argument(
+        "--rgb_key",
+        type=str,
+        default="agentview_rgb",
+        choices=["agentview_rgb", "eye_in_hand_rgb"],
+        help="Which 2D observation stream to save from HDF5.",
+    )
     parser.add_argument("--seed", type=int, default=7, help="Random seed for selecting one demo.")
     parser.add_argument("--max_points", type=int, default=1024, help="Maximum number of points rendered per frame.")
     parser.add_argument("--arrow_stride", type=int, default=24, help="Draw one flow arrow every N points.")

@@ -99,6 +99,8 @@ Randomly choose one complete demo from regenerated dataset and render scene poin
 - Point color: displacement magnitude `|disp|`
 - Optional red arrows: sparse flow vectors
 - Optional cyan trails: 3D trajectory lines over recent frames
+- Also saves corresponding LIBERO 2D observation video for direct comparison
+- Optional side-by-side comparison video (left: 3D point-flow, right: 2D observation)
 
 ### Command
 
@@ -106,6 +108,10 @@ Randomly choose one complete demo from regenerated dataset and render scene poin
 python experiments/robot/libero/generate_dataset/visualize_libero_pointflow_video.py \
   --dataset_dir /inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/datasets/libero_object_no_noops \
   --output_video /inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/datasets/libero_object_no_noops/random_demo_pointflow.mp4 \
+  --output_2d_video /inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/datasets/libero_object_no_noops/random_demo_agentview.mp4 \
+  --save_comparison \
+  --output_comparison_video /inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/datasets/libero_object_no_noops/random_demo_compare.mp4 \
+  --rgb_key agentview_rgb \
   --seed 7 \
   --max_points 1024 \
   --arrow_stride 24 \
@@ -121,6 +127,10 @@ python experiments/robot/libero/generate_dataset/visualize_libero_pointflow_vide
 ### Key Arguments
 
 - `--seed`: controls which random demo is selected
+- `--rgb_key`: 2D stream key, choose from `agentview_rgb` or `eye_in_hand_rgb`
+- `--output_2d_video`: output path of corresponding LIBERO 2D video
+- `--save_comparison`: save side-by-side comparison video
+- `--output_comparison_video`: output path for side-by-side video
 - `--max_points`: max rendered points per frame
 - `--arrow_stride`: draw one arrow every N points (`<=0` means no arrows)
 - `--trail_stride`: draw one trajectory trail every N points (`<=0` means no trails)
@@ -133,6 +143,8 @@ python experiments/robot/libero/generate_dataset/visualize_libero_pointflow_vide
 ### Output
 
 - Video file at `--output_video`
+- 2D observation video at `--output_2d_video`
+- Optional side-by-side video at `--output_comparison_video`
 - If mp4 encoding fails, script falls back to GIF and raises a message
 
 ## Data Format Reference (Regenerated HDF5)
