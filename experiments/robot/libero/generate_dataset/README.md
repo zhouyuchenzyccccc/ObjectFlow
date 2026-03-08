@@ -46,7 +46,19 @@ python experiments/robot/libero/generate_dataset/regenerate_libero_dataset.py \
   --libero_target_dir /inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/ObjectFlow/datasets/libero_object_no_noops \
   --point_count 1024 \
   --point_cube_size 1.2 \
-  --point_seed 7
+  --point_seed 7 \
+  --robot_point_weight 0.2 \
+  --min_non_robot_ratio 0.7
+```
+
+Single-file debug mode (only one task hdf5):
+
+```bash
+python experiments/robot/libero/generate_dataset/regenerate_libero_dataset.py \
+  --libero_task_suite libero_object \
+  --libero_raw_data_dir /inspire/hdd/project/wuliqifa/public/dataset/libero/datasets/libero_object \
+  --libero_target_dir /inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/ObjectFlow/datasets/libero_object_debug \
+  --single_hdf5_name KITCHEN_SCENE1_put_the_black_bowl_on_the_plate_demo.hdf5
 ```
 
 ### Key Arguments
@@ -57,6 +69,9 @@ python experiments/robot/libero/generate_dataset/regenerate_libero_dataset.py \
 - `--point_count`: number of sampled tracked points per episode
 - `--point_cube_size`: robot-centered crop cube size in meters
 - `--point_seed`: random seed for point sampling
+- `--robot_point_weight`: area weight multiplier for robot faces (`<1` reduces robot point density)
+- `--min_non_robot_ratio`: minimum fraction of sampled points forced to come from non-robot faces
+- `--single_hdf5_name`: debug mode, only process one task hdf5 file
 
 ### Output
 

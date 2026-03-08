@@ -52,6 +52,17 @@ from experiments.robot.libero.libero_utils import (
 
 
 IMAGE_RESOLUTION = 256
+ROBOT_NAME_TOKENS = (
+    "robot",
+    "panda",
+    "franka",
+    "ur",
+    "kinova",
+    "sawyer",
+    "gripper",
+    "wrist",
+    "arm",
+)
 
 
 def _get_robot_center_world(env, obs):
@@ -82,6 +93,7 @@ def _collect_mesh_triangles_in_cube(sim, cube_center, cube_size):
         face_vertex_indices: (M, 3) local vertex indices in mesh asset
         tri_local: (M, 3, 3) vertices in geom local coordinates (after mesh scale)
         area: (M,) world-space triangle area
+        is_robot_face: (M,) whether face belongs to robot mesh geom
     """
     model, data = sim.model, sim.data
 
@@ -105,6 +117,7 @@ def _collect_mesh_triangles_in_cube(sim, cube_center, cube_size):
     face_vidx_all = []
     tri_local_all = []
     area_all = []
+    is_robot_all = []
 
     for geom_id in range(model.ngeom):
         if int(geom_type[geom_id]) != MJ_GEOM_MESH:
@@ -145,12 +158,17 @@ def _collect_mesh_triangles_in_cube(sim, cube_center, cube_size):
 
         kept_face_indices = np.nonzero(in_cube)[0].astype(np.int32)
         kept_face_vidx = faces_local[in_cube].astype(np.int32)
+        geom_name = model.geom_id2name(geom_id)
+        body_name = model.body_id2name(int(model.geom_bodyid[geom_id]))
+        text = f"{geom_name or ''} {body_name or ''}".lower()
+        is_robot_geom = any(token in text for token in ROBOT_NAME_TOKENS)
 
         geom_ids_all.append(np.full((kept_face_indices.shape[0],), geom_id, dtype=np.int32))
         face_idx_all.append(kept_face_indices)
         face_vidx_all.append(kept_face_vidx)
         tri_local_all.append(tri_local[in_cube].astype(np.float32))
         area_all.append(tri_area.astype(np.float64))
+        is_robot_all.append(np.full((kept_face_indices.shape[0],), is_robot_geom, dtype=bool))
 
     if len(area_all) == 0:
         raise RuntimeError(
@@ -164,10 +182,20 @@ def _collect_mesh_triangles_in_cube(sim, cube_center, cube_size):
         "face_vertex_indices": np.concatenate(face_vidx_all, axis=0),
         "tri_local": np.concatenate(tri_local_all, axis=0),
         "area": np.concatenate(area_all, axis=0),
+        "is_robot_face": np.concatenate(is_robot_all, axis=0),
     }
 
 
-def _sample_point_tracks_from_mesh(sim, env, obs, n_points, cube_size, rng):
+def _sample_point_tracks_from_mesh(
+    sim,
+    env,
+    obs,
+    n_points,
+    cube_size,
+    rng,
+    robot_point_weight,
+    min_non_robot_ratio,
+):
     """Initialize point tracks by mesh-face sampling + barycentric coordinates.
 
     This follows Pri4R-style initialization:
@@ -179,11 +207,48 @@ def _sample_point_tracks_from_mesh(sim, env, obs, n_points, cube_size, rng):
     mesh_data = _collect_mesh_triangles_in_cube(sim, center, cube_size)
 
     areas = mesh_data["area"]
+    is_robot_face = mesh_data["is_robot_face"]
     if np.sum(areas) <= 0:
         raise RuntimeError("All candidate mesh face areas are zero; cannot sample track points.")
 
-    face_prob = areas / np.sum(areas)
-    sampled_face_ids = rng.choice(np.arange(len(face_prob)), size=n_points, replace=True, p=face_prob)
+    # Reduce robot over-sampling by down-weighting robot mesh faces.
+    weighted_areas = areas.copy()
+    if robot_point_weight <= 0:
+        raise ValueError(f"robot_point_weight must be > 0, got {robot_point_weight}")
+    weighted_areas[is_robot_face] *= robot_point_weight
+
+    if np.sum(weighted_areas) <= 0:
+        raise RuntimeError("All weighted mesh areas are zero after robot weighting.")
+
+    # Optionally enforce a minimum fraction of non-robot points.
+    has_robot = np.any(is_robot_face)
+    has_non_robot = np.any(~is_robot_face)
+    enforce_non_robot = min_non_robot_ratio > 0 and has_non_robot
+    if enforce_non_robot:
+        target_non_robot = int(np.ceil(n_points * min_non_robot_ratio))
+        target_non_robot = min(max(target_non_robot, 0), n_points)
+        target_robot = n_points - target_non_robot
+
+        non_robot_ids = np.nonzero(~is_robot_face)[0]
+        non_robot_w = weighted_areas[non_robot_ids]
+        non_robot_prob = non_robot_w / np.sum(non_robot_w)
+        sampled_non_robot = rng.choice(non_robot_ids, size=target_non_robot, replace=True, p=non_robot_prob)
+
+        sampled_robot = np.array([], dtype=np.int64)
+        if target_robot > 0:
+            if has_robot:
+                robot_ids = np.nonzero(is_robot_face)[0]
+                robot_w = weighted_areas[robot_ids]
+                robot_prob = robot_w / np.sum(robot_w)
+                sampled_robot = rng.choice(robot_ids, size=target_robot, replace=True, p=robot_prob)
+            else:
+                sampled_robot = rng.choice(non_robot_ids, size=target_robot, replace=True, p=non_robot_prob)
+
+        sampled_face_ids = np.concatenate([sampled_non_robot, sampled_robot], axis=0)
+        rng.shuffle(sampled_face_ids)
+    else:
+        face_prob = weighted_areas / np.sum(weighted_areas)
+        sampled_face_ids = rng.choice(np.arange(len(face_prob)), size=n_points, replace=True, p=face_prob)
 
     # Uniform point sampling on triangle surface via barycentric coordinates.
     # See Turk 1990: use sqrt trick for uniform area sampling.
@@ -254,6 +319,19 @@ def is_noop(action, prev_action=None, threshold=1e-4):
     return np.linalg.norm(action[:-1]) < threshold and gripper_action == prev_gripper_action
 
 
+def _normalize_single_hdf5_name(single_hdf5_name):
+    """Normalize debug hdf5 selector to '<task_name>_demo.hdf5' format."""
+    if single_hdf5_name is None:
+        return None
+
+    name = os.path.basename(single_hdf5_name.strip())
+    if name.endswith("_demo.hdf5"):
+        return name
+    if name.endswith(".hdf5"):
+        return f"{name[:-5]}_demo.hdf5"
+    return f"{name}_demo.hdf5"
+
+
 def main(args):
     print(f"Regenerating {args.libero_task_suite} dataset!")
 
@@ -280,14 +358,24 @@ def main(args):
     num_replays = 0
     num_success = 0
     num_noops = 0
+    selected_hdf5_name = _normalize_single_hdf5_name(args.single_hdf5_name)
+    matched_task_count = 0
 
     for task_id in tqdm.tqdm(range(num_tasks_in_suite)):
         # Get task in suite
         task = task_suite.get_task(task_id)
+        raw_hdf5_name = f"{task.name}_demo.hdf5"
+        if selected_hdf5_name is not None and raw_hdf5_name != selected_hdf5_name:
+            continue
+
+        matched_task_count += 1
+        if selected_hdf5_name is not None:
+            print(f"[debug] Processing only selected file: {raw_hdf5_name}")
+
         env, task_description = get_libero_env(task, "llava", resolution=IMAGE_RESOLUTION)
 
         # Get dataset for task
-        orig_data_path = os.path.join(args.libero_raw_data_dir, f"{task.name}_demo.hdf5")
+        orig_data_path = os.path.join(args.libero_raw_data_dir, raw_hdf5_name)
         assert os.path.exists(orig_data_path), f"Cannot find raw data file {orig_data_path}."
         orig_data_file = h5py.File(orig_data_path, "r")
         orig_data = orig_data_file["data"]
@@ -329,6 +417,8 @@ def main(args):
                 n_points=args.point_count,
                 cube_size=args.point_cube_size,
                 rng=episode_rng,
+                robot_point_weight=args.robot_point_weight,
+                min_non_robot_ratio=args.min_non_robot_ratio,
             )
 
             # Replay original demo actions in environment and record observations
@@ -447,6 +537,10 @@ def main(args):
 
     print(f"Dataset regeneration complete! Saved new dataset at: {args.libero_target_dir}")
     print(f"Saved metainfo JSON at: {metainfo_json_out_path}")
+    if selected_hdf5_name is not None and matched_task_count == 0:
+        raise RuntimeError(
+            f"No task matched --single_hdf5_name='{args.single_hdf5_name}' in suite '{args.libero_task_suite}'."
+        )
 
 
 if __name__ == "__main__":
@@ -464,7 +558,31 @@ if __name__ == "__main__":
                         help="Robot-centered cube size (meters) used for mesh cropping at first frame.")
     parser.add_argument("--point_seed", type=int, default=7,
                         help="Random seed for mesh-face surface sampling.")
+    parser.add_argument(
+        "--robot_point_weight",
+        type=float,
+        default=0.2,
+        help="Area weight multiplier for robot mesh faces (<1 reduces robot-point density).",
+    )
+    parser.add_argument(
+        "--min_non_robot_ratio",
+        type=float,
+        default=0.7,
+        help="Minimum fraction of sampled points from non-robot faces (range [0, 1]).",
+    )
+    parser.add_argument(
+        "--single_hdf5_name",
+        type=str,
+        default=None,
+        help=(
+            "Debug mode: process only one raw hdf5 file. Accepts task name, task_demo, or task_demo.hdf5; "
+            "for example 'KITCHEN_SCENE1_put_the_black_bowl_on_the_plate'."
+        ),
+    )
     args = parser.parse_args()
+
+    if not (0.0 <= args.min_non_robot_ratio <= 1.0):
+        raise ValueError(f"--min_non_robot_ratio must be in [0, 1], got {args.min_non_robot_ratio}")
 
     # Start data regeneration
     main(args)
