@@ -16,10 +16,14 @@ Usage:
         --libero_target_dir <PATH TO TARGET DIR>
 
     Example (LIBERO-Spatial):
+
+        export PYTHONPATH=$PYTHONPATH:/inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/LIBERO 
+        export PYTHONPATH=$PYTHONPATH:/inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/diffusion_policy
+
         python experiments/robot/libero/regenerate_libero_dataset.py \
-            --libero_task_suite libero_spatial \
-            --libero_raw_data_dir ./LIBERO/libero/datasets/libero_spatial \
-            --libero_target_dir ./LIBERO/libero/datasets/libero_spatial_no_noops
+            --libero_task_suite libero_object \
+            --libero_raw_data_dir /inspire/hdd/project/wuliqifa/public/dataset/libero/datasets/libero_object \
+            --libero_target_dir /inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/ObjectFlow/datasets/libero_object_no_noops
 
 """
 
@@ -31,7 +35,7 @@ import h5py
 import numpy as np
 import robosuite.utils.transform_utils as T
 import tqdm
-from libero.libero import benchmark
+from  libero.libero import benchmark
 
 try:
     import mujoco

@@ -58,11 +58,29 @@ pip install -r experiments/robot/libero/libero_requirements.txt
 
 Use this if you enable point backbones that require `pytorch3d` and `diffusion_policy`.
 
+
+```bash
+        export PYTHONPATH=$PYTHONPATH:/inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/LIBERO 
+        export PYTHONPATH=$PYTHONPATH:/inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/diffusion_policy
+        export LIBERO_ROOT=/inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/LIBERO/libero
+        export LIBERO_BDDL_PATH=$LIBERO_ROOT/bddl_files
+        export LIBERO_ASSETS_PATH=$LIBERO_ROOT/assets
+        export LIBERO_DATASETS_PATH=/inspire/hdd/project/wuliqifa/public/dataset/libero/datasets
+
+```
+
 ```bash
 pip install -e ".[point]"
 ```
 
 Notes:
+
+```bash
+git clone https://github.com/facebookresearch/pytorch3d
+cd pytorch3d 
+python -m pip install -U pip setuptools wheel ninja
+pip install -e . --no-build-isolation
+```
 
 * `pytorch3d` wheels are platform/CUDA specific. If `pip install -e ".[point]"` fails, install a matching `pytorch3d` wheel manually, then rerun.
 * On Windows, `pytorch3d` installation may require extra steps or WSL/Linux.

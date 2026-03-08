@@ -78,7 +78,7 @@ libero = [
     "gym",
 ]
 point = [
-    "pytorch3d>=0.7.8",
+    "pytorch3d>=0.7.5",
     "diffusion-policy @ git+https://github.com/real-stanford/diffusion_policy.git",
 ]
 sagemaker = [
