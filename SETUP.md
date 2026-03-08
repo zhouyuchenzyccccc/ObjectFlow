@@ -2,7 +2,7 @@
 
 This guide is organized in layers so you can install only what you need:
 
-1. Base OpenVLA-OFT (required)
+1. Base ObjectFlow (required)
 2. LIBERO simulation and dataset regeneration (optional)
 3. Point-cloud backbones and point-tracking extensions (optional)
 4. Flash Attention training acceleration (optional, Linux recommended)
@@ -15,8 +15,8 @@ Recommended versions for reproducibility:
 ## 1) Create Environment
 
 ```bash
-conda create -n openvla-oft python=3.10 -y
-conda activate openvla-oft
+conda create -n objectflow python=3.10 -y
+conda activate objectflow
 python -m pip install --upgrade pip setuptools wheel
 ```
 
@@ -30,11 +30,11 @@ Install a PyTorch build that matches your CUDA/CPU setup:
 pip install torch==2.2.0 torchvision==0.17.0 torchaudio==2.2.0
 ```
 
-## 3) Install OpenVLA-OFT Core
+## 3) Install ObjectFlow Core
 
 ```bash
-git clone https://github.com/moojink/openvla-oft.git
-cd openvla-oft
+git clone https://github.com/zhouyuchenzyccccc/ObjectFlow.git
+cd ObjectFlow
 pip install -e .
 ```
 
@@ -43,14 +43,16 @@ pip install -e .
 Use this if you run `run_libero_eval.py` or `regenerate_libero_dataset.py`.
 
 ```bash
-# Install openvla-oft optional LIBERO dependencies
+# Install ObjectFlow optional LIBERO dependencies
 pip install -e ".[libero]"
 
 # Install LIBERO repo itself
+cd ..
 git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git
 pip install -e LIBERO
 
 # Keep support packages aligned with project file
+cd ObjectFlow
 pip install -r experiments/robot/libero/libero_requirements.txt
 ```
 
@@ -62,10 +64,6 @@ Use this if you enable point backbones that require `pytorch3d` and `diffusion_p
 ```bash
         export PYTHONPATH=$PYTHONPATH:/inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/LIBERO 
         export PYTHONPATH=$PYTHONPATH:/inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/diffusion_policy
-        export LIBERO_ROOT=/inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/LIBERO/libero
-        export LIBERO_BDDL_PATH=$LIBERO_ROOT/bddl_files
-        export LIBERO_ASSETS_PATH=$LIBERO_ROOT/assets
-        export LIBERO_DATASETS_PATH=/inspire/hdd/project/wuliqifa/public/dataset/libero/datasets
 
 ```
 
@@ -76,6 +74,7 @@ pip install -e ".[point]"
 Notes:
 
 ```bash
+cd ..
 git clone https://github.com/facebookresearch/pytorch3d
 cd pytorch3d 
 python -m pip install -U pip setuptools wheel ninja

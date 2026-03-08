@@ -4,9 +4,11 @@ The script loads one random demo from regenerated LIBERO HDF5 files and writes a
 showing how the scene point cloud evolves over time.
 
 Usage:
-    python experiments/robot/libero/visualize_libero_pointflow_video.py \
+    python experiments/robot/libero/generate_dataset/visualize_libero_pointflow_video.py \
         --dataset_dir /path/to/libero_object_no_noops \
-        --output_video /path/to/random_demo_pointflow.mp4
+        --output_video /path/to/random_demo_pointflow.mp4 \
+        --trail_stride 16 \
+        --trail_len 25
 """
 
 import argparse
@@ -47,12 +49,17 @@ def _load_demo_points(hdf5_path: Path, demo_key: str) -> Tuple[np.ndarray, np.nd
     return point_abs, point_disp
 
 
-def _sample_points(point_abs: np.ndarray, point_disp: np.ndarray, max_points: int) -> Tuple[np.ndarray, np.ndarray]:
+def _sample_points(
+    point_abs: np.ndarray,
+    point_disp: np.ndarray,
+    max_points: int,
+    rng: np.random.Generator,
+) -> Tuple[np.ndarray, np.ndarray]:
     t_steps, n_points, _ = point_abs.shape
     if max_points >= n_points:
         return point_abs, point_disp
 
-    idx = np.random.choice(n_points, size=max_points, replace=False)
+    idx = rng.choice(n_points, size=max_points, replace=False)
     idx = np.sort(idx)
     sampled_abs = point_abs[:, idx, :]
     sampled_disp = point_disp[:, idx, :] if point_disp.shape[0] > 0 else point_disp
@@ -73,6 +80,10 @@ def _render_frames(
     point_abs: np.ndarray,
     point_disp: np.ndarray,
     arrow_stride: int,
+    trail_stride: int,
+    trail_len: int,
+    trail_alpha: float,
+    trail_width: float,
     elev: float,
     azim: float,
 ) -> List[np.ndarray]:
@@ -118,6 +129,22 @@ def _render_frames(
                 color="crimson",
                 linewidth=0.6,
             )
+
+        # Draw 3D trajectory trails for a sparse subset of points, similar to 2D optical-flow tracks.
+        if trail_len > 1 and trail_stride > 0:
+            trail_idx = np.arange(0, n_points, trail_stride)
+            start = max(0, t - trail_len + 1)
+            traj = point_abs[start : t + 1, trail_idx, :]  # (Lt, Nt, 3)
+            for k in range(traj.shape[1]):
+                path = traj[:, k, :]
+                ax.plot(
+                    path[:, 0],
+                    path[:, 1],
+                    path[:, 2],
+                    color="deepskyblue",
+                    alpha=trail_alpha,
+                    linewidth=trail_width,
+                )
 
         _set_axes_equal(ax, xyz_min, xyz_max)
         ax.view_init(elev=elev, azim=azim)
@@ -179,7 +206,7 @@ def main(args: argparse.Namespace) -> None:
     hdf5_path, demo_key = demo_refs[choice_idx]
 
     point_abs, point_disp = _load_demo_points(hdf5_path, demo_key)
-    point_abs, point_disp = _sample_points(point_abs, point_disp, args.max_points)
+    point_abs, point_disp = _sample_points(point_abs, point_disp, args.max_points, rng)
 
     print(f"Selected demo: {hdf5_path.name}:{demo_key}")
     print(f"Pointcloud shape: abs={point_abs.shape}, disp={point_disp.shape}")
@@ -188,6 +215,10 @@ def main(args: argparse.Namespace) -> None:
         point_abs=point_abs,
         point_disp=point_disp,
         arrow_stride=args.arrow_stride,
+        trail_stride=args.trail_stride,
+        trail_len=args.trail_len,
+        trail_alpha=args.trail_alpha,
+        trail_width=args.trail_width,
         elev=args.elev,
         azim=args.azim,
     )
@@ -203,6 +234,10 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=7, help="Random seed for selecting one demo.")
     parser.add_argument("--max_points", type=int, default=1024, help="Maximum number of points rendered per frame.")
     parser.add_argument("--arrow_stride", type=int, default=24, help="Draw one flow arrow every N points.")
+    parser.add_argument("--trail_stride", type=int, default=16, help="Draw one trajectory line every N points.")
+    parser.add_argument("--trail_len", type=int, default=25, help="Number of past frames shown as trajectory trail.")
+    parser.add_argument("--trail_alpha", type=float, default=0.35, help="Transparency of trajectory trails.")
+    parser.add_argument("--trail_width", type=float, default=0.8, help="Line width for trajectory trails.")
     parser.add_argument("--fps", type=int, default=12, help="Video frame rate.")
     parser.add_argument("--elev", type=float, default=22.0, help="3D camera elevation angle.")
     parser.add_argument("--azim", type=float, default=-55.0, help="3D camera azimuth angle.")

@@ -10,7 +10,7 @@ This folder contains scripts for regenerating LIBERO HDF5 data, validating saved
 
 ## 0. Environment Preparation
 
-Use your `openvla-oft` environment and make sure LIBERO-related paths are visible:
+Use your `objectflow` environment and make sure LIBERO-related paths are visible:
 
 ```bash
 export PYTHONPATH=$PYTHONPATH:/inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/LIBERO
@@ -77,8 +77,8 @@ Also generate quick per-episode diagnostics.
 
 ```bash
 python experiments/robot/libero/generate_dataset/inspect_regenerated_libero_points.py \
-  --dataset_dir /inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/ObjectFlow/datasets/libero_object_no_noops \
-  --output_dir /inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/ObjectFlow/datasets/libero_object_no_noops_inspect \
+  --dataset_dir /inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/datasets/libero_object_no_noops \
+  --output_dir /inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/datasets/libero_object_no_noops_inspect \
   --num_visualize 12 \
   --sample_points 512 \
   --error_tol 1e-6
@@ -98,16 +98,21 @@ Randomly choose one complete demo from regenerated dataset and render scene poin
 
 - Point color: displacement magnitude `|disp|`
 - Optional red arrows: sparse flow vectors
+- Optional cyan trails: 3D trajectory lines over recent frames
 
 ### Command
 
 ```bash
 python experiments/robot/libero/generate_dataset/visualize_libero_pointflow_video.py \
-  --dataset_dir /inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/ObjectFlow/datasets/libero_object_no_noops \
-  --output_video /inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/ObjectFlow/datasets/libero_object_no_noops/random_demo_pointflow.mp4 \
+  --dataset_dir /inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/datasets/libero_object_no_noops \
+  --output_video /inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/datasets/libero_object_no_noops/random_demo_pointflow.mp4 \
   --seed 7 \
   --max_points 1024 \
   --arrow_stride 24 \
+  --trail_stride 16 \
+  --trail_len 25 \
+  --trail_alpha 0.35 \
+  --trail_width 0.8 \
   --fps 12 \
   --elev 22 \
   --azim -55
@@ -118,6 +123,10 @@ python experiments/robot/libero/generate_dataset/visualize_libero_pointflow_vide
 - `--seed`: controls which random demo is selected
 - `--max_points`: max rendered points per frame
 - `--arrow_stride`: draw one arrow every N points (`<=0` means no arrows)
+- `--trail_stride`: draw one trajectory trail every N points (`<=0` means no trails)
+- `--trail_len`: number of recent frames used for each trajectory trail
+- `--trail_alpha`: trajectory trail transparency
+- `--trail_width`: trajectory trail line width
 - `--fps`: output video FPS
 - `--elev`, `--azim`: 3D camera angles
 
