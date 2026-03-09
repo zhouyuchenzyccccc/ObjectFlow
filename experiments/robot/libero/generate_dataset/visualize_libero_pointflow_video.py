@@ -21,6 +21,15 @@ import imageio.v2 as imageio
 import matplotlib.pyplot as plt
 import numpy as np
 
+PHASE_ID_TO_NAME = {
+    0: "idle",
+    1: "robot_move",
+    2: "grasp_or_contact",
+    3: "co_move",
+    4: "object_switch",
+    5: "object_move",
+}
+
 
 def _list_hdf5_files(dataset_dir: Path) -> List[Path]:
     return sorted(dataset_dir.glob("*_demo.hdf5"))
@@ -42,13 +51,38 @@ def _collect_demo_refs(hdf5_files: List[Path], rgb_key: str) -> List[Tuple[Path,
     return refs
 
 
-def _load_demo_data(hdf5_path: Path, demo_key: str, rgb_key: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _load_demo_data(
+    hdf5_path: Path,
+    demo_key: str,
+    rgb_key: str,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     with h5py.File(hdf5_path, "r") as f:
         obs = f["data"][demo_key]["obs"]
         point_abs = obs["pointcloud_abs"][()].astype(np.float32)  # (T, N, 3)
         point_disp = obs["pointcloud_disp"][()].astype(np.float32)  # (T-1, N, 3)
         rgb_frames = obs[rgb_key][()]  # (T, H, W, 3)
-    return point_abs, point_disp, rgb_frames
+
+        n_steps = point_disp.shape[0]
+        n_points = point_abs.shape[1]
+        is_robot_point = obs["point_track_is_robot"][()].astype(bool) if "point_track_is_robot" in obs else np.zeros((n_points,), dtype=bool)
+        object_group_id = (
+            obs["point_motion_object_group_id"][()].astype(np.int32)
+            if "point_motion_object_group_id" in obs
+            else np.full((n_points,), -1, dtype=np.int32)
+        )
+        point_is_moving = (
+            obs["point_motion_is_moving"][()].astype(np.uint8)
+            if "point_motion_is_moving" in obs
+            else (np.linalg.norm(point_disp, axis=-1) > 1e-3).astype(np.uint8)
+        )
+        phase_label = obs["phase_label"][()].astype(np.uint8) if "phase_label" in obs else np.zeros((n_steps,), dtype=np.uint8)
+        phase_dominant_group = (
+            obs["phase_dominant_object_group"][()].astype(np.int32)
+            if "phase_dominant_object_group" in obs
+            else np.full((n_steps,), -1, dtype=np.int32)
+        )
+
+    return point_abs, point_disp, rgb_frames, is_robot_point, object_group_id, point_is_moving, phase_label, phase_dominant_group
 
 
 def _normalize_rgb_frames(rgb_frames: np.ndarray) -> np.ndarray:
@@ -81,16 +115,16 @@ def _sample_points(
     point_disp: np.ndarray,
     max_points: int,
     rng: np.random.Generator,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     t_steps, n_points, _ = point_abs.shape
     if max_points >= n_points:
-        return point_abs, point_disp
+        return point_abs, point_disp, np.arange(n_points, dtype=np.int32)
 
     idx = rng.choice(n_points, size=max_points, replace=False)
     idx = np.sort(idx)
     sampled_abs = point_abs[:, idx, :]
     sampled_disp = point_disp[:, idx, :] if point_disp.shape[0] > 0 else point_disp
-    return sampled_abs, sampled_disp
+    return sampled_abs, sampled_disp, idx.astype(np.int32)
 
 
 def _set_axes_equal(ax: plt.Axes, xyz_min: np.ndarray, xyz_max: np.ndarray) -> None:
@@ -106,6 +140,11 @@ def _set_axes_equal(ax: plt.Axes, xyz_min: np.ndarray, xyz_max: np.ndarray) -> N
 def _render_frames(
     point_abs: np.ndarray,
     point_disp: np.ndarray,
+    is_robot_point: np.ndarray,
+    object_group_id: np.ndarray,
+    point_is_moving: np.ndarray,
+    phase_label: np.ndarray,
+    phase_dominant_group: np.ndarray,
     arrow_stride: int,
     trail_stride: int,
     trail_len: int,
@@ -115,6 +154,7 @@ def _render_frames(
     azim: float,
 ) -> List[np.ndarray]:
     t_steps, n_points, _ = point_abs.shape
+    group_cmap = plt.get_cmap("tab10")
 
     xyz_min = point_abs.reshape(-1, 3).min(axis=0)
     xyz_max = point_abs.reshape(-1, 3).max(axis=0)
@@ -127,22 +167,66 @@ def _render_frames(
         ax.cla()
 
         pts = point_abs[t]
-        if t < point_disp.shape[0]:
-            speed = np.linalg.norm(point_disp[t], axis=1)
+        if t < point_is_moving.shape[0]:
+            moving_mask = point_is_moving[t].astype(bool)
         else:
-            speed = np.zeros((n_points,), dtype=np.float32)
+            moving_mask = np.zeros((n_points,), dtype=bool)
 
-        sc = ax.scatter(
-            pts[:, 0],
-            pts[:, 1],
-            pts[:, 2],
-            c=speed,
-            cmap="viridis",
-            s=6,
-            vmin=0.0,
-            vmax=max(float(np.percentile(speed, 99)), 1e-6),
-            alpha=0.95,
-        )
+        robot_mask = is_robot_point.astype(bool)
+        object_mask = ~robot_mask
+
+        # Robot points (single semantic class).
+        if np.any(robot_mask):
+            ax.scatter(
+                pts[robot_mask, 0],
+                pts[robot_mask, 1],
+                pts[robot_mask, 2],
+                color="orangered",
+                s=8,
+                alpha=0.8,
+                label="robot points" if t == 0 else None,
+            )
+
+        # Object points grouped by first-motion time clusters.
+        object_groups = np.unique(object_group_id[object_mask & (object_group_id >= 0)])
+        for group_id in object_groups:
+            group_mask = object_mask & (object_group_id == group_id)
+            color = group_cmap(int(group_id) % 10)
+            ax.scatter(
+                pts[group_mask, 0],
+                pts[group_mask, 1],
+                pts[group_mask, 2],
+                color=color,
+                s=7,
+                alpha=0.65,
+                label=f"object group {int(group_id)}" if t == 0 else None,
+            )
+
+        unknown_object_mask = object_mask & (object_group_id < 0)
+        if np.any(unknown_object_mask):
+            ax.scatter(
+                pts[unknown_object_mask, 0],
+                pts[unknown_object_mask, 1],
+                pts[unknown_object_mask, 2],
+                color="steelblue",
+                s=7,
+                alpha=0.45,
+                label="object (unclustered)" if t == 0 else None,
+            )
+
+        # Highlight currently moving points with bright rings.
+        if np.any(moving_mask):
+            ax.scatter(
+                pts[moving_mask, 0],
+                pts[moving_mask, 1],
+                pts[moving_mask, 2],
+                facecolors="none",
+                edgecolors="yellow",
+                linewidths=0.5,
+                s=18,
+                alpha=0.95,
+                label="moving points" if t == 0 else None,
+            )
 
         if t < point_disp.shape[0] and arrow_stride > 0:
             arrow_idx = np.arange(0, n_points, arrow_stride)
@@ -164,11 +248,17 @@ def _render_frames(
             traj = point_abs[start : t + 1, trail_idx, :]  # (Lt, Nt, 3)
             for k in range(traj.shape[1]):
                 path = traj[:, k, :]
+                point_id = trail_idx[k]
+                if is_robot_point[point_id]:
+                    line_color = "orange"
+                else:
+                    gid = int(object_group_id[point_id])
+                    line_color = group_cmap(gid % 10) if gid >= 0 else "deepskyblue"
                 ax.plot(
                     path[:, 0],
                     path[:, 1],
                     path[:, 2],
-                    color="deepskyblue",
+                    color=line_color,
                     alpha=trail_alpha,
                     linewidth=trail_width,
                 )
@@ -178,18 +268,21 @@ def _render_frames(
         ax.set_xlabel("x (m)")
         ax.set_ylabel("y (m)")
         ax.set_zlabel("z (m)")
-        ax.set_title(f"Scene Point Flow | frame {t + 1}/{t_steps}")
-
-        cbar = fig.colorbar(sc, ax=ax, shrink=0.7, pad=0.08)
-        cbar.set_label("|disp| (m)")
+        phase_idx = t if t < phase_label.shape[0] else max(phase_label.shape[0] - 1, 0)
+        phase_id = int(phase_label[phase_idx]) if phase_label.shape[0] > 0 else 0
+        phase_name = PHASE_ID_TO_NAME.get(phase_id, f"unknown_{phase_id}")
+        dominant_group = int(phase_dominant_group[phase_idx]) if phase_dominant_group.shape[0] > 0 else -1
+        ax.set_title(
+            f"Scene Point Flow | frame {t + 1}/{t_steps} | phase={phase_name}({phase_id}) | dom_group={dominant_group}"
+        )
+        if t == 0:
+            ax.legend(loc="upper right", fontsize=8)
 
         fig.tight_layout()
         fig.canvas.draw()
         frame = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
         frame = frame.reshape(fig.canvas.get_width_height()[1], fig.canvas.get_width_height()[0], 4)
         frames.append(frame[:, :, :3].copy())
-
-        cbar.remove()
 
     plt.close(fig)
     return frames
@@ -272,10 +365,24 @@ def main(args: argparse.Namespace) -> None:
     choice_idx = int(rng.integers(len(demo_refs)))
     hdf5_path, demo_key = demo_refs[choice_idx]
 
-    point_abs, point_disp, rgb_frames = _load_demo_data(hdf5_path, demo_key, args.rgb_key)
+    (
+        point_abs,
+        point_disp,
+        rgb_frames,
+        is_robot_point,
+        object_group_id,
+        point_is_moving,
+        phase_label,
+        phase_dominant_group,
+    ) = _load_demo_data(hdf5_path, demo_key, args.rgb_key)
     rgb_frames = _normalize_rgb_frames(rgb_frames)
     rgb_frames = _maybe_rotate_rgb_frames(rgb_frames, args.rotate_rgb_180)
-    point_abs, point_disp = _sample_points(point_abs, point_disp, args.max_points, rng)
+    point_abs, point_disp, subset_idx = _sample_points(point_abs, point_disp, args.max_points, rng)
+    if subset_idx.shape[0] != is_robot_point.shape[0]:
+        is_robot_point = is_robot_point[subset_idx]
+        object_group_id = object_group_id[subset_idx]
+        if point_is_moving.shape[1] >= subset_idx.shape[0]:
+            point_is_moving = point_is_moving[:, subset_idx]
 
     print(f"Selected demo: {hdf5_path.name}:{demo_key}")
     print(f"Pointcloud shape: abs={point_abs.shape}, disp={point_disp.shape}")
@@ -284,6 +391,11 @@ def main(args: argparse.Namespace) -> None:
     frames = _render_frames(
         point_abs=point_abs,
         point_disp=point_disp,
+        is_robot_point=is_robot_point,
+        object_group_id=object_group_id,
+        point_is_moving=point_is_moving,
+        phase_label=phase_label,
+        phase_dominant_group=phase_dominant_group,
         arrow_stride=args.arrow_stride,
         trail_stride=args.trail_stride,
         trail_len=args.trail_len,

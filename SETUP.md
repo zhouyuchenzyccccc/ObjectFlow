@@ -65,10 +65,15 @@ Use this if you enable point backbones that require `pytorch3d` and `diffusion_p
         export PYTHONPATH=$PYTHONPATH:/inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/LIBERO 
         export PYTHONPATH=$PYTHONPATH:/inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/diffusion_policy
 
+        export LIBERO_ROOT=/inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/LIBERO/libero
+        export LIBERO_BDDL_PATH=$LIBERO_ROOT/bddl_files
+        export LIBERO_ASSETS_PATH=$LIBERO_ROOT/assets
+        export LIBERO_DATASETS_PATH=/inspire/hdd/project/wuliqifa/public/dataset/libero/datasets
 ```
 
 ```bash
 pip install -e ".[point]"
+conda install -c conda-forge gcc
 ```
 
 Notes:

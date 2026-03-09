@@ -63,6 +63,14 @@ ROBOT_NAME_TOKENS = (
     "wrist",
     "arm",
 )
+PHASE_ID_TO_NAME = {
+    0: "idle",
+    1: "robot_move",
+    2: "grasp_or_contact",
+    3: "co_move",
+    4: "object_switch",
+    5: "object_move",
+}
 
 
 def _get_robot_center_world(env, obs):
@@ -273,6 +281,7 @@ def _sample_point_tracks_from_mesh(
         "face_vertex_indices": mesh_data["face_vertex_indices"][sampled_face_ids].astype(np.int32),
         "barycentric": barycentric,
         "local_points": sampled_local_points,
+        "is_robot_point": mesh_data["is_robot_face"][sampled_face_ids].astype(np.uint8),
     }
 
 
@@ -292,6 +301,110 @@ def _track_points_world(sim, point_track_info):
         world_points[mask] = (local_points[mask] @ rotation.T + translation).astype(np.float32)
 
     return world_points
+
+
+def _assign_object_groups(first_active_t, is_robot_point, time_gap):
+    """Cluster object points by first activation time to approximate manipulated object groups."""
+    n_points = first_active_t.shape[0]
+    group_ids = np.full((n_points,), -1, dtype=np.int32)
+
+    valid = np.where((~is_robot_point) & (first_active_t >= 0))[0]
+    if valid.shape[0] == 0:
+        return group_ids
+
+    ordered = valid[np.argsort(first_active_t[valid])]
+    curr_group = 0
+    prev_t = int(first_active_t[ordered[0]])
+    group_ids[ordered[0]] = curr_group
+
+    for idx in ordered[1:]:
+        t = int(first_active_t[idx])
+        if t - prev_t > time_gap:
+            curr_group += 1
+        group_ids[idx] = curr_group
+        prev_t = t
+
+    return group_ids
+
+
+def _extract_pointflow_temporal_info(pointcloud_disp_np, is_robot_point, args):
+    """Extract point-wise motion states and coarse operation phases from temporal point flow."""
+    n_steps = pointcloud_disp_np.shape[0]
+    n_points = is_robot_point.shape[0]
+
+    speed = np.linalg.norm(pointcloud_disp_np, axis=-1).astype(np.float32)  # (T-1, Np)
+    is_moving = (speed > args.point_motion_threshold).astype(np.uint8)  # (T-1, Np)
+
+    first_active_t = np.full((n_points,), -1, dtype=np.int32)
+    if n_steps > 0:
+        move_bool = is_moving.astype(bool)
+        any_moved = move_bool.any(axis=0)
+        first_idx = np.argmax(move_bool, axis=0).astype(np.int32)
+        first_active_t[any_moved] = first_idx[any_moved]
+
+    robot_mask = is_robot_point.astype(bool)
+    object_mask = ~robot_mask
+    object_group_id = _assign_object_groups(first_active_t, robot_mask, args.object_group_time_gap)
+
+    phase_label = np.zeros((n_steps,), dtype=np.uint8)
+    dominant_object_group = np.full((n_steps,), -1, dtype=np.int32)
+    robot_active_ratio = np.zeros((n_steps,), dtype=np.float32)
+    object_active_ratio = np.zeros((n_steps,), dtype=np.float32)
+
+    prev_object_active = False
+    unique_groups = np.unique(object_group_id[object_group_id >= 0])
+    for t in range(n_steps):
+        if np.any(robot_mask):
+            robot_active_ratio[t] = float(is_moving[t, robot_mask].mean())
+        if np.any(object_mask):
+            object_active_ratio[t] = float(is_moving[t, object_mask].mean())
+
+        robot_active = robot_active_ratio[t] >= args.robot_active_ratio_threshold
+        object_active = object_active_ratio[t] >= args.object_active_ratio_threshold
+
+        best_group = -1
+        best_group_ratio = 0.0
+        for group_id in unique_groups:
+            mask = object_group_id == group_id
+            if np.any(mask):
+                ratio = float(is_moving[t, mask].mean())
+                if ratio > best_group_ratio:
+                    best_group_ratio = ratio
+                    best_group = int(group_id)
+        if best_group_ratio >= args.object_group_active_ratio_threshold:
+            dominant_object_group[t] = best_group
+
+        if robot_active and not object_active:
+            phase_label[t] = 1
+        elif robot_active and object_active:
+            if not prev_object_active:
+                phase_label[t] = 2
+            elif (
+                t > 0
+                and dominant_object_group[t] >= 0
+                and dominant_object_group[t - 1] >= 0
+                and dominant_object_group[t] != dominant_object_group[t - 1]
+            ):
+                phase_label[t] = 4
+            else:
+                phase_label[t] = 3
+        elif (not robot_active) and object_active:
+            phase_label[t] = 5
+        else:
+            phase_label[t] = 0
+
+        prev_object_active = bool(object_active)
+
+    return {
+        "point_motion_speed": speed,
+        "point_motion_is_moving": is_moving,
+        "point_motion_first_active_t": first_active_t,
+        "point_motion_object_group_id": object_group_id,
+        "phase_label": phase_label,
+        "phase_dominant_object_group": dominant_object_group,
+        "phase_robot_active_ratio": robot_active_ratio,
+        "phase_object_active_ratio": object_active_ratio,
+    }
 
 
 def is_noop(action, prev_action=None, threshold=1e-4):
@@ -481,6 +594,11 @@ def main(args):
                     pointcloud_disp_np = (pointcloud_abs_np[1:] - pointcloud_abs_np[:-1]).astype(np.float32)  # (T-1, Np, 3)
                 else:
                     pointcloud_disp_np = np.zeros((0, args.point_count, 3), dtype=np.float32)
+                temporal_info = _extract_pointflow_temporal_info(
+                    pointcloud_disp_np=pointcloud_disp_np,
+                    is_robot_point=point_track_info["is_robot_point"].astype(bool),
+                    args=args,
+                )
 
                 ep_data_grp = grp.create_group(f"demo_{i}")
                 obs_grp = ep_data_grp.create_group("obs")
@@ -497,6 +615,20 @@ def main(args):
                 obs_grp.create_dataset("point_track_face_indices", data=point_track_info["face_indices"], dtype=np.int32)
                 obs_grp.create_dataset("point_track_face_vertex_indices", data=point_track_info["face_vertex_indices"], dtype=np.int32)
                 obs_grp.create_dataset("point_track_barycentric", data=point_track_info["barycentric"], dtype=np.float32)
+                obs_grp.create_dataset("point_track_is_robot", data=point_track_info["is_robot_point"], dtype=np.uint8)
+                obs_grp.create_dataset("point_track_semantic_id", data=point_track_info["is_robot_point"], dtype=np.uint8)
+                obs_grp.create_dataset("point_motion_speed", data=temporal_info["point_motion_speed"], dtype=np.float32)
+                obs_grp.create_dataset("point_motion_is_moving", data=temporal_info["point_motion_is_moving"], dtype=np.uint8)
+                obs_grp.create_dataset("point_motion_first_active_t", data=temporal_info["point_motion_first_active_t"], dtype=np.int32)
+                obs_grp.create_dataset("point_motion_object_group_id", data=temporal_info["point_motion_object_group_id"], dtype=np.int32)
+                obs_grp.create_dataset("phase_label", data=temporal_info["phase_label"], dtype=np.uint8)
+                obs_grp.create_dataset(
+                    "phase_dominant_object_group",
+                    data=temporal_info["phase_dominant_object_group"],
+                    dtype=np.int32,
+                )
+                obs_grp.create_dataset("phase_robot_active_ratio", data=temporal_info["phase_robot_active_ratio"], dtype=np.float32)
+                obs_grp.create_dataset("phase_object_active_ratio", data=temporal_info["phase_object_active_ratio"], dtype=np.float32)
                 ep_data_grp.create_dataset("actions", data=actions)
                 ep_data_grp.create_dataset("states", data=np.stack(states))
                 ep_data_grp.create_dataset("robot_states", data=np.stack(robot_states, axis=0))
@@ -529,6 +661,12 @@ def main(args):
 
             # Report total number of no-op actions filtered out so far
             print(f"  Total # no-op actions filtered out: {num_noops}")
+            if done and temporal_info["phase_label"].shape[0] > 0:
+                phase_counts = {
+                    PHASE_ID_TO_NAME[int(pid)]: int((temporal_info["phase_label"] == pid).sum())
+                    for pid in np.unique(temporal_info["phase_label"])
+                }
+                print(f"  Phase counts: {phase_counts}")
 
         # Close HDF5 files
         orig_data_file.close()
@@ -579,10 +717,57 @@ if __name__ == "__main__":
             "for example 'KITCHEN_SCENE1_put_the_black_bowl_on_the_plate'."
         ),
     )
+    parser.add_argument(
+        "--point_motion_threshold",
+        type=float,
+        default=2e-3,
+        help="Motion threshold (meters/frame) for static/moving point state split.",
+    )
+    parser.add_argument(
+        "--robot_active_ratio_threshold",
+        type=float,
+        default=0.02,
+        help="Robot-active threshold on moving-point ratio per timestep.",
+    )
+    parser.add_argument(
+        "--object_active_ratio_threshold",
+        type=float,
+        default=0.01,
+        help="Object-active threshold on moving-point ratio per timestep.",
+    )
+    parser.add_argument(
+        "--object_group_time_gap",
+        type=int,
+        default=8,
+        help="Frame-gap threshold for splitting object groups by first activation time.",
+    )
+    parser.add_argument(
+        "--object_group_active_ratio_threshold",
+        type=float,
+        default=0.02,
+        help="Minimum moving ratio for assigning dominant active object group at a timestep.",
+    )
     args = parser.parse_args()
 
     if not (0.0 <= args.min_non_robot_ratio <= 1.0):
         raise ValueError(f"--min_non_robot_ratio must be in [0, 1], got {args.min_non_robot_ratio}")
+    if not (0.0 <= args.robot_active_ratio_threshold <= 1.0):
+        raise ValueError(
+            f"--robot_active_ratio_threshold must be in [0, 1], got {args.robot_active_ratio_threshold}"
+        )
+    if not (0.0 <= args.object_active_ratio_threshold <= 1.0):
+        raise ValueError(
+            f"--object_active_ratio_threshold must be in [0, 1], got {args.object_active_ratio_threshold}"
+        )
+    if not (0.0 <= args.object_group_active_ratio_threshold <= 1.0):
+        raise ValueError(
+            "--object_group_active_ratio_threshold must be in [0, 1], "
+            f"got {args.object_group_active_ratio_threshold}"
+        )
+    if args.point_motion_threshold < 0:
+        raise ValueError(f"--point_motion_threshold must be >= 0, got {args.point_motion_threshold}")
+    if args.object_group_time_gap < 0:
+        raise ValueError(f"--object_group_time_gap must be >= 0, got {args.object_group_time_gap}")
 
     # Start data regeneration
     main(args)

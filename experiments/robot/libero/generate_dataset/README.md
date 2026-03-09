@@ -15,6 +15,11 @@ Use your `objectflow` environment and make sure LIBERO-related paths are visible
 ```bash
 export PYTHONPATH=$PYTHONPATH:/inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/LIBERO
 export PYTHONPATH=$PYTHONPATH:/inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/diffusion_policy
+export MUJOCO_GL=glx
+Xvfb :1 -screen 0 1920x1080x24 &
+export DISPLAY=:1
+
+
 ```
 
 Recommended dependencies for these tools:
@@ -35,7 +40,8 @@ Replay original LIBERO demonstrations in simulator, then save regenerated trajec
 
 - filtering no-op actions,
 - keeping successful demos only,
-- saving Pri4R-style point tracks (`pointcloud_abs`, `pointcloud_disp`, etc.).
+- saving Pri4R-style point tracks (`pointcloud_abs`, `pointcloud_disp`, etc.),
+- extracting semantic-temporal point-flow labels (robot vs object, moving-state changes, phase labels).
 
 ### Command
 
@@ -48,7 +54,12 @@ python experiments/robot/libero/generate_dataset/regenerate_libero_dataset.py \
   --point_cube_size 1.2 \
   --point_seed 7 \
   --robot_point_weight 0.2 \
-  --min_non_robot_ratio 0.7
+  --min_non_robot_ratio 0.7 \
+  --point_motion_threshold 0.002 \
+  --robot_active_ratio_threshold 0.02 \
+  --object_active_ratio_threshold 0.01 \
+  --object_group_time_gap 8 \
+  --object_group_active_ratio_threshold 0.02
 ```
 
 Single-file debug mode (only one task hdf5):
@@ -58,7 +69,7 @@ python experiments/robot/libero/generate_dataset/regenerate_libero_dataset.py \
   --libero_task_suite libero_object \
   --libero_raw_data_dir /inspire/hdd/project/wuliqifa/public/dataset/libero/datasets/libero_object \
   --libero_target_dir /inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/ObjectFlow/datasets/libero_object_debug \
-  --single_hdf5_name KITCHEN_SCENE1_put_the_black_bowl_on_the_plate_demo.hdf5
+  --single_hdf5_name pick_up_the_milk_and_place_it_in_the_basket_demo.hdf5
 ```
 
 ### Key Arguments
@@ -72,6 +83,11 @@ python experiments/robot/libero/generate_dataset/regenerate_libero_dataset.py \
 - `--robot_point_weight`: area weight multiplier for robot faces (`<1` reduces robot point density)
 - `--min_non_robot_ratio`: minimum fraction of sampled points forced to come from non-robot faces
 - `--single_hdf5_name`: debug mode, only process one task hdf5 file
+- `--point_motion_threshold`: per-point static/moving threshold (meters/frame)
+- `--robot_active_ratio_threshold`: phase split threshold on robot moving-point ratio
+- `--object_active_ratio_threshold`: phase split threshold on object moving-point ratio
+- `--object_group_time_gap`: split moved-object groups by first-activation frame gap
+- `--object_group_active_ratio_threshold`: minimum active ratio for dominant object group assignment
 
 ### Output
 
@@ -99,6 +115,17 @@ python experiments/robot/libero/generate_dataset/inspect_regenerated_libero_poin
   --error_tol 1e-6
 ```
 
+Inspect command for single-file debug output:
+
+```bash
+python experiments/robot/libero/generate_dataset/inspect_regenerated_libero_points.py \
+  --dataset_dir /inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/datasets/libero_object_debug \
+  --output_dir /inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/datasets/libero_object_debug_inspect \
+  --num_visualize 8 \
+  --sample_points 512 \
+  --error_tol 1e-6
+```
+
 ### Output
 
 - Summary CSV: `<output_dir>/summary_metrics.csv`
@@ -111,9 +138,11 @@ python experiments/robot/libero/generate_dataset/inspect_regenerated_libero_poin
 
 Randomly choose one complete demo from regenerated dataset and render scene point cloud evolution frame-by-frame.
 
-- Point color: displacement magnitude `|disp|`
+- Robot points and object points are visualized as separate semantic streams
+- Object points are color-coded by temporal object group (`point_motion_object_group_id`)
 - Optional red arrows: sparse flow vectors
-- Optional cyan trails: 3D trajectory lines over recent frames
+- Optional semantic trails: robot trails vs object-group trails
+- Current moving points are highlighted
 - Also saves corresponding LIBERO 2D observation video for direct comparison
 - Optional side-by-side comparison video (left: 3D point-flow, right: 2D observation)
 
@@ -126,6 +155,29 @@ python experiments/robot/libero/generate_dataset/visualize_libero_pointflow_vide
   --output_2d_video /inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/datasets/libero_object_no_noops/random_demo_agentview.mp4 \
   --save_comparison \
   --output_comparison_video /inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/datasets/libero_object_no_noops/random_demo_compare.mp4 \
+  --rgb_key agentview_rgb \
+  --rotate_rgb_180 \
+  --seed 7 \
+  --max_points 1024 \
+  --arrow_stride 24 \
+  --trail_stride 16 \
+  --trail_len 25 \
+  --trail_alpha 0.35 \
+  --trail_width 0.8 \
+  --fps 12 \
+  --elev 22 \
+  --azim -55
+```
+
+### Command for single-file debug output:
+
+```bash
+python experiments/robot/libero/generate_dataset/visualize_libero_pointflow_video.py \
+  --dataset_dir /inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/datasets/libero_object_debug \
+  --output_video /inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/datasets/libero_object_debug/random_demo_pointflow.mp4 \
+  --output_2d_video /inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/datasets/libero_object_debug/random_demo_agentview.mp4 \
+  --save_comparison \
+  --output_comparison_video /inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/datasets/libero_object_debug/random_demo_compare.mp4 \
   --rgb_key agentview_rgb \
   --rotate_rgb_180 \
   --seed 7 \
@@ -158,6 +210,11 @@ python experiments/robot/libero/generate_dataset/visualize_libero_pointflow_vide
 - `--fps`: output video FPS
 - `--elev`, `--azim`: 3D camera angles
 
+In the 3D video title, you will also see:
+
+- `phase=<name>(id)`: coarse operation stage label per frame
+- `dom_group=<id>`: dominant active object group at the current frame
+
 ### Output
 
 - Video file at `--output_video`
@@ -175,6 +232,25 @@ Typical path for one episode:
 - `/data/demo_x/obs/point_track_face_indices`: `(Np,)`, `int32`
 - `/data/demo_x/obs/point_track_face_vertex_indices`: `(Np, 3)`, `int32`
 - `/data/demo_x/obs/point_track_barycentric`: `(Np, 3)`, `float32`
+- `/data/demo_x/obs/point_track_is_robot`: `(Np,)`, `uint8` (`1=robot`, `0=object`)
+- `/data/demo_x/obs/point_track_semantic_id`: `(Np,)`, `uint8` (same coding as above)
+- `/data/demo_x/obs/point_motion_speed`: `(T-1, Np)`, `float32`
+- `/data/demo_x/obs/point_motion_is_moving`: `(T-1, Np)`, `uint8`
+- `/data/demo_x/obs/point_motion_first_active_t`: `(Np,)`, `int32` (`-1` means never moved)
+- `/data/demo_x/obs/point_motion_object_group_id`: `(Np,)`, `int32` (`-1` means robot/unassigned)
+- `/data/demo_x/obs/phase_label`: `(T-1,)`, `uint8`
+- `/data/demo_x/obs/phase_dominant_object_group`: `(T-1,)`, `int32`
+- `/data/demo_x/obs/phase_robot_active_ratio`: `(T-1,)`, `float32`
+- `/data/demo_x/obs/phase_object_active_ratio`: `(T-1,)`, `float32`
+
+Phase label definition:
+
+- `0`: idle
+- `1`: robot_move
+- `2`: grasp_or_contact
+- `3`: co_move
+- `4`: object_switch
+- `5`: object_move
 
 ## Maintenance Rule
 
