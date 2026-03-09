@@ -76,7 +76,10 @@ def _compute_metrics(
                 f"expected ({n_points},), got {point_motion_object_group_id.shape}"
             )
         valid_groups = point_motion_object_group_id[point_motion_object_group_id >= 0]
-        metrics["num_object_groups"] = float(len(np.unique(valid_groups)))
+        moved_groups = point_motion_object_group_id[point_motion_object_group_id > 0]
+        metrics["num_object_groups"] = float(len(np.unique(moved_groups)))
+        if valid_groups.size > 0:
+            metrics["background_point_ratio"] = float(np.mean(valid_groups == 0))
 
     if phase_label is not None:
         if phase_label.shape[0] != max(t_steps - 1, 0):
@@ -248,13 +251,14 @@ def main(args: argparse.Namespace) -> None:
     with open(summary_path, "w", encoding="utf-8") as fw:
         fw.write(
             "file,demo,t_steps,n_points,max_abs_error,mean_abs_error,rmse,"
-            "robot_point_ratio,num_object_groups,num_phase_transitions\n"
+            "robot_point_ratio,background_point_ratio,num_object_groups,num_phase_transitions\n"
         )
         for file_name, demo_key, m in summary_rows:
             fw.write(
                 f"{file_name},{demo_key},{int(m['t_steps'])},{int(m['n_points'])},"
                 f"{m['max_abs_error']:.8e},{m['mean_abs_error']:.8e},{m['rmse']:.8e},"
-                f"{m.get('robot_point_ratio', -1.0):.8e},{m.get('num_object_groups', -1.0):.8e},"
+                f"{m.get('robot_point_ratio', -1.0):.8e},{m.get('background_point_ratio', -1.0):.8e},"
+                f"{m.get('num_object_groups', -1.0):.8e},"
                 f"{m.get('num_phase_transitions', -1.0):.8e}\n"
             )
 

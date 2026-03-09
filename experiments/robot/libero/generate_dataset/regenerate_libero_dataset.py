@@ -550,31 +550,62 @@ def _track_points_world(sim, point_track_info):
     return world_points
 
 
-def _assign_object_groups(first_active_t, is_robot_point, time_gap):
-    """Cluster object points by first activation time to approximate manipulated object groups."""
-    n_points = first_active_t.shape[0]
-    group_ids = np.full((n_points,), -1, dtype=np.int32)
+def _build_point_object_instance_ids(sim, point_track_info):
+    """Build compact object-instance ids for points based on geom->body mapping.
 
-    valid = np.where((~is_robot_point) & (first_active_t >= 0))[0]
-    if valid.shape[0] == 0:
-        return group_ids
+    Returns per-point ids:
+      -1: robot point
+      >=0: compact object-instance id (same id => same body instance)
+    """
+    geom_ids = point_track_info["geom_ids"].astype(np.int32)
+    is_robot = point_track_info["is_robot_point"].astype(bool)
 
-    ordered = valid[np.argsort(first_active_t[valid])]
-    curr_group = 0
-    prev_t = int(first_active_t[ordered[0]])
-    group_ids[ordered[0]] = curr_group
+    model = sim.model
+    geom_body_ids = np.asarray(model.geom_bodyid, dtype=np.int32)
+    body_ids = geom_body_ids[geom_ids]
 
-    for idx in ordered[1:]:
-        t = int(first_active_t[idx])
-        if t - prev_t > time_gap:
-            curr_group += 1
-        group_ids[idx] = curr_group
-        prev_t = t
+    instance_ids = np.full((geom_ids.shape[0],), -1, dtype=np.int32)
+    object_body_ids = np.unique(body_ids[~is_robot])
+    object_body_ids = np.sort(object_body_ids)
+    body_to_instance = {int(body_id): idx for idx, body_id in enumerate(object_body_ids.tolist())}
 
-    return group_ids
+    for i in np.where(~is_robot)[0]:
+        instance_ids[i] = body_to_instance[int(body_ids[i])]
+
+    return instance_ids
 
 
-def _extract_pointflow_temporal_info(pointcloud_disp_np, is_robot_point, args):
+def _index_to_alpha_label(index):
+    """Convert 0-based index to alphabetic suffix: 0->a, 25->z, 26->aa."""
+    if index < 0:
+        raise ValueError(f"index must be >= 0, got {index}")
+
+    n = index + 1
+    chars = []
+    while n > 0:
+        n -= 1
+        chars.append(chr(ord("a") + (n % 26)))
+        n //= 26
+    return "".join(reversed(chars))
+
+
+def _build_point_object_labels(point_object_group_id, is_robot_point):
+    """Build per-point semantic labels: robot/background/move_object_* as fixed-length bytes."""
+    n_points = point_object_group_id.shape[0]
+    labels = np.full((n_points,), "background", dtype="S32")
+    robot_mask = is_robot_point.astype(bool)
+    labels[robot_mask] = np.asarray("robot", dtype="S32")
+
+    move_mask = (~robot_mask) & (point_object_group_id > 0)
+    for gid in np.unique(point_object_group_id[move_mask]):
+        suffix = _index_to_alpha_label(int(gid) - 1)
+        name = f"move_object_{suffix}"
+        labels[(~robot_mask) & (point_object_group_id == gid)] = np.asarray(name, dtype="S32")
+
+    return labels
+
+
+def _extract_pointflow_temporal_info(pointcloud_disp_np, is_robot_point, point_object_instance_id, args):
     """Extract point-wise motion states and coarse operation phases from temporal point flow."""
     n_steps = pointcloud_disp_np.shape[0]
     n_points = is_robot_point.shape[0]
@@ -591,7 +622,29 @@ def _extract_pointflow_temporal_info(pointcloud_disp_np, is_robot_point, args):
 
     robot_mask = is_robot_point.astype(bool)
     object_mask = ~robot_mask
-    object_group_id = _assign_object_groups(first_active_t, robot_mask, args.object_group_time_gap)
+
+    # Object group semantics:
+    #   -1: robot
+    #    0: background (object exists but never moved)
+    #   >=1: moved object ids in order of first activation (move_object_a/b/...)
+    object_group_id = np.full((n_points,), -1, dtype=np.int32)
+    if np.any(object_mask):
+        object_group_id[object_mask] = 0
+        moved_point_mask = (first_active_t >= 0) & object_mask
+        unique_instances = np.unique(point_object_instance_id[moved_point_mask])
+        unique_instances = unique_instances[unique_instances >= 0]
+
+        instance_first_t = []
+        for instance_id in unique_instances:
+            mask = (point_object_instance_id == instance_id) & moved_point_mask
+            if np.any(mask):
+                instance_first_t.append((int(first_active_t[mask].min()), int(instance_id)))
+        instance_first_t.sort(key=lambda x: (x[0], x[1]))
+        instance_to_move_gid = {instance_id: rank + 1 for rank, (_, instance_id) in enumerate(instance_first_t)}
+
+        for instance_id, move_gid in instance_to_move_gid.items():
+            mask = object_mask & (point_object_instance_id == instance_id)
+            object_group_id[mask] = int(move_gid)
 
     phase_label = np.zeros((n_steps,), dtype=np.uint8)
     dominant_object_group = np.full((n_steps,), -1, dtype=np.int32)
@@ -599,7 +652,7 @@ def _extract_pointflow_temporal_info(pointcloud_disp_np, is_robot_point, args):
     object_active_ratio = np.zeros((n_steps,), dtype=np.float32)
 
     prev_object_active = False
-    unique_groups = np.unique(object_group_id[object_group_id >= 0])
+    unique_groups = np.unique(object_group_id[object_group_id > 0])
     for t in range(n_steps):
         if np.any(robot_mask):
             robot_active_ratio[t] = float(is_moving[t, robot_mask].mean())
@@ -628,8 +681,8 @@ def _extract_pointflow_temporal_info(pointcloud_disp_np, is_robot_point, args):
                 phase_label[t] = 2
             elif (
                 t > 0
-                and dominant_object_group[t] >= 0
-                and dominant_object_group[t - 1] >= 0
+                and dominant_object_group[t] > 0
+                and dominant_object_group[t - 1] > 0
                 and dominant_object_group[t] != dominant_object_group[t - 1]
             ):
                 phase_label[t] = 4
@@ -646,7 +699,9 @@ def _extract_pointflow_temporal_info(pointcloud_disp_np, is_robot_point, args):
         "point_motion_speed": speed,
         "point_motion_is_moving": is_moving,
         "point_motion_first_active_t": first_active_t,
+        "point_motion_object_instance_id": point_object_instance_id.astype(np.int32),
         "point_motion_object_group_id": object_group_id,
+        "point_motion_object_label": _build_point_object_labels(object_group_id, is_robot_point),
         "phase_label": phase_label,
         "phase_dominant_object_group": dominant_object_group,
         "phase_robot_active_ratio": robot_active_ratio,
@@ -841,9 +896,11 @@ def main(args):
                     pointcloud_disp_np = (pointcloud_abs_np[1:] - pointcloud_abs_np[:-1]).astype(np.float32)  # (T-1, Np, 3)
                 else:
                     pointcloud_disp_np = np.zeros((0, args.point_count, 3), dtype=np.float32)
+                point_object_instance_id = _build_point_object_instance_ids(env.sim, point_track_info)
                 temporal_info = _extract_pointflow_temporal_info(
                     pointcloud_disp_np=pointcloud_disp_np,
                     is_robot_point=point_track_info["is_robot_point"].astype(bool),
+                    point_object_instance_id=point_object_instance_id,
                     args=args,
                 )
 
@@ -867,7 +924,9 @@ def main(args):
                 obs_grp.create_dataset("point_motion_speed", data=temporal_info["point_motion_speed"], dtype=np.float32)
                 obs_grp.create_dataset("point_motion_is_moving", data=temporal_info["point_motion_is_moving"], dtype=np.uint8)
                 obs_grp.create_dataset("point_motion_first_active_t", data=temporal_info["point_motion_first_active_t"], dtype=np.int32)
+                obs_grp.create_dataset("point_motion_object_instance_id", data=temporal_info["point_motion_object_instance_id"], dtype=np.int32)
                 obs_grp.create_dataset("point_motion_object_group_id", data=temporal_info["point_motion_object_group_id"], dtype=np.int32)
+                obs_grp.create_dataset("point_motion_object_label", data=temporal_info["point_motion_object_label"], dtype="S32")
                 obs_grp.create_dataset("phase_label", data=temporal_info["phase_label"], dtype=np.uint8)
                 obs_grp.create_dataset(
                     "phase_dominant_object_group",
@@ -983,12 +1042,6 @@ if __name__ == "__main__":
         help="Object-active threshold on moving-point ratio per timestep.",
     )
     parser.add_argument(
-        "--object_group_time_gap",
-        type=int,
-        default=8,
-        help="Frame-gap threshold for splitting object groups by first activation time.",
-    )
-    parser.add_argument(
         "--object_group_active_ratio_threshold",
         type=float,
         default=0.02,
@@ -1013,8 +1066,5 @@ if __name__ == "__main__":
         )
     if args.point_motion_threshold < 0:
         raise ValueError(f"--point_motion_threshold must be >= 0, got {args.point_motion_threshold}")
-    if args.object_group_time_gap < 0:
-        raise ValueError(f"--object_group_time_gap must be >= 0, got {args.object_group_time_gap}")
-
     # Start data regeneration
     main(args)

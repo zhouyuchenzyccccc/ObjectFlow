@@ -56,7 +56,7 @@ def _load_demo_data(
     hdf5_path: Path,
     demo_key: str,
     rgb_key: str,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     with h5py.File(hdf5_path, "r") as f:
         obs = f["data"][demo_key]["obs"]
         point_abs = obs["pointcloud_abs"][()].astype(np.float32)  # (T, N, 3)
@@ -82,8 +82,38 @@ def _load_demo_data(
             if "phase_dominant_object_group" in obs
             else np.full((n_steps,), -1, dtype=np.int32)
         )
+        if "point_motion_object_label" in obs:
+            object_labels = np.asarray(obs["point_motion_object_label"][()]).astype("S32")
+        else:
+            object_labels = np.full((n_points,), b"", dtype="S32")
 
-    return point_abs, point_disp, rgb_frames, is_robot_point, object_group_id, point_is_moving, phase_label, phase_dominant_group
+    return (
+        point_abs,
+        point_disp,
+        rgb_frames,
+        is_robot_point,
+        object_group_id,
+        point_is_moving,
+        phase_label,
+        phase_dominant_group,
+        object_labels,
+    )
+
+
+def _group_id_to_name(group_id: int) -> str:
+    if group_id < 0:
+        return "robot"
+    if group_id == 0:
+        return "background"
+
+    idx = group_id - 1
+    chars = []
+    n = idx + 1
+    while n > 0:
+        n -= 1
+        chars.append(chr(ord("a") + (n % 26)))
+        n //= 26
+    return f"move_object_{''.join(reversed(chars))}"
 
 
 def _normalize_rgb_frames(rgb_frames: np.ndarray) -> np.ndarray:
@@ -146,6 +176,7 @@ def _render_frames(
     point_is_moving: np.ndarray,
     phase_label: np.ndarray,
     phase_dominant_group: np.ndarray,
+    object_labels: np.ndarray,
     arrow_stride: int,
     trail_stride: int,
     trail_len: int,
@@ -198,7 +229,7 @@ def _render_frames(
                 label="robot points" if t == 0 else None,
             )
 
-        # Object points grouped by first-motion time clusters.
+        # Object points are grouped as background (0) or moved objects (>=1).
         object_groups = np.unique(object_group_id[object_mask & (object_group_id >= 0)])
         for group_id in object_groups:
             group_mask = object_mask & (object_group_id == group_id)
@@ -210,7 +241,7 @@ def _render_frames(
                 color=color,
                 s=7,
                 alpha=0.65,
-                label=f"object group {int(group_id)}" if t == 0 else None,
+                label=f"{_group_id_to_name(int(group_id))}" if t == 0 else None,
             )
 
         unknown_object_mask = object_mask & (object_group_id < 0)
@@ -283,8 +314,11 @@ def _render_frames(
         phase_id = int(phase_label[phase_idx]) if phase_label.shape[0] > 0 else 0
         phase_name = PHASE_ID_TO_NAME.get(phase_id, f"unknown_{phase_id}")
         dominant_group = int(phase_dominant_group[phase_idx]) if phase_dominant_group.shape[0] > 0 else -1
+        dominant_group_name = _group_id_to_name(dominant_group)
         ax.set_title(
-            f"Scene Point Flow | frame {t + 1}/{t_steps} | phase={phase_name}({phase_id}) | dom_group={dominant_group}"
+            "Scene Point Flow | "
+            f"frame {t + 1}/{t_steps} | phase={phase_name}({phase_id}) | "
+            f"dom={dominant_group_name}({dominant_group})"
         )
 
         # Persistent side panel makes semantic color coding explicit in every frame.
@@ -296,7 +330,7 @@ def _render_frames(
         y -= line_h * 0.85
         ax_info.text(0.02, y, f"phase: {phase_name} ({phase_id})", fontsize=9, va="top")
         y -= line_h * 0.85
-        ax_info.text(0.02, y, f"dom group: {dominant_group}", fontsize=9, va="top")
+        ax_info.text(0.02, y, f"dom object: {dominant_group_name} ({dominant_group})", fontsize=9, va="top")
         y -= line_h
 
         ax_info.text(0.02, y, "Semantic Colors", fontsize=9.5, fontweight="bold", va="top")
@@ -321,13 +355,24 @@ def _render_frames(
 
         _legend_row("robot", robot_color)
         _legend_row("moving highlight", moving_highlight_color)
-        _legend_row("object (unclustered)", unknown_object_color)
+        _legend_row("object (legacy unclustered)", unknown_object_color)
 
         if object_groups_all:
-            ax_info.text(0.02, y, "Object Group Colors", fontsize=9.5, fontweight="bold", va="top")
+            ax_info.text(0.02, y, "Object Labels", fontsize=9.5, fontweight="bold", va="top")
             y -= line_h * 0.8
             for gid in object_groups_all:
-                _legend_row(f"group {gid}", group_color_map[gid])
+                label_name = _group_id_to_name(gid)
+                if object_labels.size == object_group_id.size and gid >= 0:
+                    mask = object_group_id == gid
+                    if np.any(mask):
+                        raw = object_labels[np.where(mask)[0][0]]
+                        try:
+                            decoded = raw.decode("ascii") if isinstance(raw, (bytes, np.bytes_)) else str(raw)
+                            if decoded:
+                                label_name = decoded
+                        except Exception:
+                            pass
+                _legend_row(f"{label_name} ({gid})", group_color_map[gid])
 
         fig.tight_layout()
         fig.canvas.draw()
@@ -425,6 +470,7 @@ def main(args: argparse.Namespace) -> None:
         point_is_moving,
         phase_label,
         phase_dominant_group,
+        object_labels,
     ) = _load_demo_data(hdf5_path, demo_key, args.rgb_key)
     rgb_frames = _normalize_rgb_frames(rgb_frames)
     rgb_frames = _maybe_rotate_rgb_frames(rgb_frames, args.rotate_rgb_180)
@@ -432,6 +478,7 @@ def main(args: argparse.Namespace) -> None:
     if subset_idx.shape[0] != is_robot_point.shape[0]:
         is_robot_point = is_robot_point[subset_idx]
         object_group_id = object_group_id[subset_idx]
+        object_labels = object_labels[subset_idx]
         if point_is_moving.shape[1] >= subset_idx.shape[0]:
             point_is_moving = point_is_moving[:, subset_idx]
 
@@ -447,6 +494,7 @@ def main(args: argparse.Namespace) -> None:
         point_is_moving=point_is_moving,
         phase_label=phase_label,
         phase_dominant_group=phase_dominant_group,
+        object_labels=object_labels,
         arrow_stride=args.arrow_stride,
         trail_stride=args.trail_stride,
         trail_len=args.trail_len,

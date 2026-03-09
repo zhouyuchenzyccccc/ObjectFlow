@@ -58,7 +58,6 @@ python experiments/robot/libero/generate_dataset/regenerate_libero_dataset.py \
   --point_motion_threshold 0.002 \
   --robot_active_ratio_threshold 0.02 \
   --object_active_ratio_threshold 0.01 \
-  --object_group_time_gap 8 \
   --object_group_active_ratio_threshold 0.02
 ```
 
@@ -86,7 +85,6 @@ python experiments/robot/libero/generate_dataset/regenerate_libero_dataset.py \
 - `--point_motion_threshold`: per-point static/moving threshold (meters/frame)
 - `--robot_active_ratio_threshold`: phase split threshold on robot moving-point ratio
 - `--object_active_ratio_threshold`: phase split threshold on object moving-point ratio
-- `--object_group_time_gap`: split moved-object groups by first-activation frame gap
 - `--object_group_active_ratio_threshold`: minimum active ratio for dominant object group assignment
 
 ### Output
@@ -139,7 +137,7 @@ python experiments/robot/libero/generate_dataset/inspect_regenerated_libero_poin
 Randomly choose one complete demo from regenerated dataset and render scene point cloud evolution frame-by-frame.
 
 - Robot points and object points are visualized as separate semantic streams
-- Object points are color-coded by temporal object group (`point_motion_object_group_id`)
+- Object points are color-coded by moved-object labels (`background`, `move_object_a`, `move_object_b`, ...)
 - Optional red arrows: sparse flow vectors
 - Optional semantic trails: robot trails vs object-group trails
 - Current moving points are highlighted
@@ -245,7 +243,9 @@ Typical path for one episode:
 - `/data/demo_x/obs/point_motion_speed`: `(T-1, Np)`, `float32`
 - `/data/demo_x/obs/point_motion_is_moving`: `(T-1, Np)`, `uint8`
 - `/data/demo_x/obs/point_motion_first_active_t`: `(Np,)`, `int32` (`-1` means never moved)
-- `/data/demo_x/obs/point_motion_object_group_id`: `(Np,)`, `int32` (`-1` means robot/unassigned)
+- `/data/demo_x/obs/point_motion_object_instance_id`: `(Np,)`, `int32` (`-1` robot, `>=0` object instance id)
+- `/data/demo_x/obs/point_motion_object_group_id`: `(Np,)`, `int32` (`-1` robot, `0` background, `>=1` moved objects)
+- `/data/demo_x/obs/point_motion_object_label`: `(Np,)`, `S32` (`robot` / `background` / `move_object_*`)
 - `/data/demo_x/obs/phase_label`: `(T-1,)`, `uint8`
 - `/data/demo_x/obs/phase_dominant_object_group`: `(T-1,)`, `int32`
 - `/data/demo_x/obs/phase_robot_active_ratio`: `(T-1,)`, `float32`
