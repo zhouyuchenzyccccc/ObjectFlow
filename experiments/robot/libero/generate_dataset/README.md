@@ -49,7 +49,7 @@ Replay original LIBERO demonstrations in simulator, then save regenerated trajec
 python experiments/robot/libero/generate_dataset/regenerate_libero_dataset.py \
   --libero_task_suite libero_object \
   --libero_raw_data_dir /inspire/hdd/project/wuliqifa/public/dataset/libero/datasets/libero_object \
-  --libero_target_dir /inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/ObjectFlow/datasets/libero_object_no_noops \
+  --libero_target_dir /inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/datasets/libero_object_no_noops \
   --point_count 1024 \
   --point_cube_size 1.2 \
   --point_seed 7 \
@@ -68,7 +68,7 @@ Single-file debug mode (only one task hdf5):
 python experiments/robot/libero/generate_dataset/regenerate_libero_dataset.py \
   --libero_task_suite libero_object \
   --libero_raw_data_dir /inspire/hdd/project/wuliqifa/public/dataset/libero/datasets/libero_object \
-  --libero_target_dir /inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/ObjectFlow/datasets/libero_object_debug \
+  --libero_target_dir /inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/datasets/libero_object_debug \
   --single_hdf5_name pick_up_the_milk_and_place_it_in_the_basket_demo.hdf5
 ```
 
