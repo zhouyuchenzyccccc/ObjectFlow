@@ -19,6 +19,7 @@ from typing import List, Optional, Tuple
 import h5py
 import imageio.v2 as imageio
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 import numpy as np
 
 PHASE_ID_TO_NAME = {
@@ -155,16 +156,26 @@ def _render_frames(
 ) -> List[np.ndarray]:
     t_steps, n_points, _ = point_abs.shape
     group_cmap = plt.get_cmap("tab10")
+    robot_color = "orangered"
+    unknown_object_color = "steelblue"
+    moving_highlight_color = "yellow"
 
     xyz_min = point_abs.reshape(-1, 3).min(axis=0)
     xyz_max = point_abs.reshape(-1, 3).max(axis=0)
 
-    fig = plt.figure(figsize=(8.4, 7.2), dpi=120)
-    ax = fig.add_subplot(111, projection="3d")
+    fig = plt.figure(figsize=(10.0, 7.2), dpi=120)
+    gs = fig.add_gridspec(1, 2, width_ratios=[4.8, 1.7], wspace=0.06)
+    ax = fig.add_subplot(gs[0, 0], projection="3d")
+    ax_info = fig.add_subplot(gs[0, 1])
+
+    object_groups_all = [int(g) for g in np.unique(object_group_id[object_group_id >= 0])]
+    group_color_map = {gid: group_cmap(gid % 10) for gid in object_groups_all}
 
     frames: List[np.ndarray] = []
     for t in range(t_steps):
         ax.cla()
+        ax_info.cla()
+        ax_info.set_axis_off()
 
         pts = point_abs[t]
         if t < point_is_moving.shape[0]:
@@ -181,7 +192,7 @@ def _render_frames(
                 pts[robot_mask, 0],
                 pts[robot_mask, 1],
                 pts[robot_mask, 2],
-                color="orangered",
+                color=robot_color,
                 s=8,
                 alpha=0.8,
                 label="robot points" if t == 0 else None,
@@ -191,7 +202,7 @@ def _render_frames(
         object_groups = np.unique(object_group_id[object_mask & (object_group_id >= 0)])
         for group_id in object_groups:
             group_mask = object_mask & (object_group_id == group_id)
-            color = group_cmap(int(group_id) % 10)
+            color = group_color_map[int(group_id)]
             ax.scatter(
                 pts[group_mask, 0],
                 pts[group_mask, 1],
@@ -208,7 +219,7 @@ def _render_frames(
                 pts[unknown_object_mask, 0],
                 pts[unknown_object_mask, 1],
                 pts[unknown_object_mask, 2],
-                color="steelblue",
+                color=unknown_object_color,
                 s=7,
                 alpha=0.45,
                 label="object (unclustered)" if t == 0 else None,
@@ -221,7 +232,7 @@ def _render_frames(
                 pts[moving_mask, 1],
                 pts[moving_mask, 2],
                 facecolors="none",
-                edgecolors="yellow",
+                edgecolors=moving_highlight_color,
                 linewidths=0.5,
                 s=18,
                 alpha=0.95,
@@ -253,7 +264,7 @@ def _render_frames(
                     line_color = "orange"
                 else:
                     gid = int(object_group_id[point_id])
-                    line_color = group_cmap(gid % 10) if gid >= 0 else "deepskyblue"
+                    line_color = group_color_map[gid] if gid >= 0 else "deepskyblue"
                 ax.plot(
                     path[:, 0],
                     path[:, 1],
@@ -275,8 +286,48 @@ def _render_frames(
         ax.set_title(
             f"Scene Point Flow | frame {t + 1}/{t_steps} | phase={phase_name}({phase_id}) | dom_group={dominant_group}"
         )
-        if t == 0:
-            ax.legend(loc="upper right", fontsize=8)
+
+        # Persistent side panel makes semantic color coding explicit in every frame.
+        y = 0.98
+        line_h = 0.08
+        ax_info.text(0.02, y, "Legend", fontsize=11, fontweight="bold", va="top")
+        y -= line_h
+        ax_info.text(0.02, y, f"frame: {t + 1}/{t_steps}", fontsize=9, va="top")
+        y -= line_h * 0.85
+        ax_info.text(0.02, y, f"phase: {phase_name} ({phase_id})", fontsize=9, va="top")
+        y -= line_h * 0.85
+        ax_info.text(0.02, y, f"dom group: {dominant_group}", fontsize=9, va="top")
+        y -= line_h
+
+        ax_info.text(0.02, y, "Semantic Colors", fontsize=9.5, fontweight="bold", va="top")
+        y -= line_h * 0.8
+
+        def _legend_row(label, color):
+            nonlocal y
+            ax_info.add_patch(
+                mpatches.Rectangle(
+                    (0.02, y - 0.028),
+                    0.075,
+                    0.03,
+                    facecolor=color,
+                    edgecolor="black",
+                    linewidth=0.3,
+                    transform=ax_info.transAxes,
+                    clip_on=False,
+                )
+            )
+            ax_info.text(0.11, y - 0.004, label, fontsize=8.6, va="center")
+            y -= line_h * 0.68
+
+        _legend_row("robot", robot_color)
+        _legend_row("moving highlight", moving_highlight_color)
+        _legend_row("object (unclustered)", unknown_object_color)
+
+        if object_groups_all:
+            ax_info.text(0.02, y, "Object Group Colors", fontsize=9.5, fontweight="bold", va="top")
+            y -= line_h * 0.8
+            for gid in object_groups_all:
+                _legend_row(f"group {gid}", group_color_map[gid])
 
         fig.tight_layout()
         fig.canvas.draw()

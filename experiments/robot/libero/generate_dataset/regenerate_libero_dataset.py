@@ -40,8 +40,18 @@ from  libero.libero import benchmark
 try:
     import mujoco
 
+    MJ_GEOM_SPHERE = int(mujoco.mjtGeom.mjGEOM_SPHERE)
+    MJ_GEOM_CAPSULE = int(mujoco.mjtGeom.mjGEOM_CAPSULE)
+    MJ_GEOM_ELLIPSOID = int(mujoco.mjtGeom.mjGEOM_ELLIPSOID)
+    MJ_GEOM_CYLINDER = int(mujoco.mjtGeom.mjGEOM_CYLINDER)
+    MJ_GEOM_BOX = int(mujoco.mjtGeom.mjGEOM_BOX)
     MJ_GEOM_MESH = int(mujoco.mjtGeom.mjGEOM_MESH)
 except Exception:
+    MJ_GEOM_SPHERE = 2
+    MJ_GEOM_CAPSULE = 3
+    MJ_GEOM_ELLIPSOID = 4
+    MJ_GEOM_CYLINDER = 5
+    MJ_GEOM_BOX = 6
     # Fallback value used by MuJoCo enums for mesh geom type.
     MJ_GEOM_MESH = 7
 
@@ -194,6 +204,243 @@ def _collect_mesh_triangles_in_cube(sim, cube_center, cube_size):
     }
 
 
+def _triangulate_primitive_geom_local(geom_type, geom_size, angular_bins=24, lat_bins=12):
+    """Generate local-space surface triangles for primitive MuJoCo geoms."""
+    size = np.asarray(geom_size, dtype=np.float32)
+    pi = np.pi
+
+    if geom_type == MJ_GEOM_BOX:
+        hx, hy, hz = float(size[0]), float(size[1]), float(size[2])
+        vertices = np.array(
+            [
+                [-hx, -hy, -hz],
+                [hx, -hy, -hz],
+                [hx, hy, -hz],
+                [-hx, hy, -hz],
+                [-hx, -hy, hz],
+                [hx, -hy, hz],
+                [hx, hy, hz],
+                [-hx, hy, hz],
+            ],
+            dtype=np.float32,
+        )
+        faces = np.array(
+            [
+                [0, 1, 2], [0, 2, 3],
+                [4, 6, 5], [4, 7, 6],
+                [0, 4, 5], [0, 5, 1],
+                [1, 5, 6], [1, 6, 2],
+                [2, 6, 7], [2, 7, 3],
+                [3, 7, 4], [3, 4, 0],
+            ],
+            dtype=np.int32,
+        )
+        return vertices[faces]
+
+    if geom_type == MJ_GEOM_CYLINDER:
+        radius = float(size[0])
+        half_len = float(size[1])
+        theta = np.linspace(0.0, 2.0 * pi, angular_bins, endpoint=False)
+        x = radius * np.cos(theta)
+        y = radius * np.sin(theta)
+
+        tris = []
+        for i in range(angular_bins):
+            j = (i + 1) % angular_bins
+            p0 = np.array([x[i], y[i], -half_len], dtype=np.float32)
+            p1 = np.array([x[j], y[j], -half_len], dtype=np.float32)
+            p2 = np.array([x[j], y[j], half_len], dtype=np.float32)
+            p3 = np.array([x[i], y[i], half_len], dtype=np.float32)
+            tris.append(np.stack([p0, p1, p2], axis=0))
+            tris.append(np.stack([p0, p2, p3], axis=0))
+
+            c_bot = np.array([0.0, 0.0, -half_len], dtype=np.float32)
+            c_top = np.array([0.0, 0.0, half_len], dtype=np.float32)
+            tris.append(np.stack([c_bot, p1, p0], axis=0))
+            tris.append(np.stack([c_top, p3, p2], axis=0))
+
+        return np.stack(tris, axis=0).astype(np.float32)
+
+    if geom_type in (MJ_GEOM_SPHERE, MJ_GEOM_ELLIPSOID):
+        if geom_type == MJ_GEOM_SPHERE:
+            radii = np.array([size[0], size[0], size[0]], dtype=np.float32)
+        else:
+            radii = np.array([size[0], size[1], size[2]], dtype=np.float32)
+
+        lon = np.linspace(0.0, 2.0 * pi, angular_bins + 1)
+        lat = np.linspace(-0.5 * pi, 0.5 * pi, lat_bins + 1)
+        tris = []
+        for il in range(lat_bins):
+            lat0, lat1 = lat[il], lat[il + 1]
+            for io in range(angular_bins):
+                lon0, lon1 = lon[io], lon[io + 1]
+                p00 = np.array([np.cos(lat0) * np.cos(lon0), np.cos(lat0) * np.sin(lon0), np.sin(lat0)], dtype=np.float32)
+                p01 = np.array([np.cos(lat0) * np.cos(lon1), np.cos(lat0) * np.sin(lon1), np.sin(lat0)], dtype=np.float32)
+                p10 = np.array([np.cos(lat1) * np.cos(lon0), np.cos(lat1) * np.sin(lon0), np.sin(lat1)], dtype=np.float32)
+                p11 = np.array([np.cos(lat1) * np.cos(lon1), np.cos(lat1) * np.sin(lon1), np.sin(lat1)], dtype=np.float32)
+
+                p00 = p00 * radii
+                p01 = p01 * radii
+                p10 = p10 * radii
+                p11 = p11 * radii
+                tris.append(np.stack([p00, p01, p11], axis=0))
+                tris.append(np.stack([p00, p11, p10], axis=0))
+        return np.stack(tris, axis=0).astype(np.float32)
+
+    if geom_type == MJ_GEOM_CAPSULE:
+        radius = float(size[0])
+        half_len = float(size[1])
+        theta = np.linspace(0.0, 2.0 * pi, angular_bins + 1)
+        lat = np.linspace(-0.5 * pi, 0.5 * pi, lat_bins + 1)
+        tris = []
+
+        # Cylinder belt.
+        for i in range(angular_bins):
+            th0, th1 = theta[i], theta[i + 1]
+            p0 = np.array([radius * np.cos(th0), radius * np.sin(th0), -half_len], dtype=np.float32)
+            p1 = np.array([radius * np.cos(th1), radius * np.sin(th1), -half_len], dtype=np.float32)
+            p2 = np.array([radius * np.cos(th1), radius * np.sin(th1), half_len], dtype=np.float32)
+            p3 = np.array([radius * np.cos(th0), radius * np.sin(th0), half_len], dtype=np.float32)
+            tris.append(np.stack([p0, p1, p2], axis=0))
+            tris.append(np.stack([p0, p2, p3], axis=0))
+
+        # Hemispheres.
+        for il in range(lat_bins):
+            lat0, lat1 = lat[il], lat[il + 1]
+            for io in range(angular_bins):
+                lon0, lon1 = theta[io], theta[io + 1]
+                for sign in (-1.0, 1.0):
+                    if sign < 0 and (lat0 > 0 or lat1 > 0):
+                        continue
+                    if sign > 0 and (lat0 < 0 or lat1 < 0):
+                        continue
+                    z_shift = sign * half_len
+                    p00 = np.array([np.cos(lat0) * np.cos(lon0), np.cos(lat0) * np.sin(lon0), np.sin(lat0)], dtype=np.float32)
+                    p01 = np.array([np.cos(lat0) * np.cos(lon1), np.cos(lat0) * np.sin(lon1), np.sin(lat0)], dtype=np.float32)
+                    p10 = np.array([np.cos(lat1) * np.cos(lon0), np.cos(lat1) * np.sin(lon0), np.sin(lat1)], dtype=np.float32)
+                    p11 = np.array([np.cos(lat1) * np.cos(lon1), np.cos(lat1) * np.sin(lon1), np.sin(lat1)], dtype=np.float32)
+                    for p in (p00, p01, p10, p11):
+                        p *= radius
+                        p[2] += z_shift
+                    tris.append(np.stack([p00, p01, p11], axis=0))
+                    tris.append(np.stack([p00, p11, p10], axis=0))
+
+        return np.stack(tris, axis=0).astype(np.float32)
+
+    return None
+
+
+def _collect_surface_triangles_in_cube(sim, cube_center, cube_size):
+    """Collect surface triangles for mesh + primitive geoms within a robot-centered 3D cube."""
+    model, data = sim.model, sim.data
+
+    geom_type = np.asarray(model.geom_type)
+    geom_dataid = np.asarray(model.geom_dataid)
+    geom_size = np.asarray(model.geom_size)
+    geom_xpos = np.asarray(data.geom_xpos)
+    geom_xmat = np.asarray(data.geom_xmat).reshape(-1, 3, 3)
+
+    mesh_vert = np.asarray(model.mesh_vert)
+    mesh_face = np.asarray(model.mesh_face, dtype=np.int32)
+    mesh_vertadr = np.asarray(model.mesh_vertadr, dtype=np.int32)
+    mesh_vertnum = np.asarray(model.mesh_vertnum, dtype=np.int32)
+    mesh_faceadr = np.asarray(model.mesh_faceadr, dtype=np.int32)
+    mesh_facenum = np.asarray(model.mesh_facenum, dtype=np.int32)
+    mesh_scale = np.asarray(model.mesh_scale) if hasattr(model, "mesh_scale") else None
+
+    supported_primitive_types = {
+        MJ_GEOM_BOX,
+        MJ_GEOM_SPHERE,
+        MJ_GEOM_ELLIPSOID,
+        MJ_GEOM_CYLINDER,
+        MJ_GEOM_CAPSULE,
+    }
+
+    half_extent = cube_size / 2.0
+
+    geom_ids_all = []
+    face_idx_all = []
+    face_vidx_all = []
+    tri_local_all = []
+    area_all = []
+    is_robot_all = []
+
+    for geom_id in range(model.ngeom):
+        gtype = int(geom_type[geom_id])
+        tri_local = None
+        face_vidx = None
+
+        if gtype == MJ_GEOM_MESH:
+            mesh_id = int(geom_dataid[geom_id])
+            if mesh_id < 0:
+                continue
+
+            vert_start = mesh_vertadr[mesh_id]
+            vert_num = mesh_vertnum[mesh_id]
+            face_start = mesh_faceadr[mesh_id]
+            face_num = mesh_facenum[mesh_id]
+            if vert_num == 0 or face_num == 0:
+                continue
+
+            verts_local = mesh_vert[vert_start : vert_start + vert_num].copy()
+            if mesh_scale is not None and len(mesh_scale) > mesh_id:
+                verts_local = verts_local * mesh_scale[mesh_id]
+
+            faces_local = mesh_face[face_start : face_start + face_num].copy()
+            tri_local = verts_local[faces_local].astype(np.float32)
+            face_vidx = faces_local.astype(np.int32)
+        elif gtype in supported_primitive_types:
+            tri_local = _triangulate_primitive_geom_local(gtype, geom_size[geom_id])
+            if tri_local is None or tri_local.shape[0] == 0:
+                continue
+            face_vidx = np.full((tri_local.shape[0], 3), -1, dtype=np.int32)
+        else:
+            continue
+
+        rotation = geom_xmat[geom_id]
+        translation = geom_xpos[geom_id]
+        tri_world = tri_local @ rotation.T + translation
+
+        tri_centers = tri_world.mean(axis=1)
+        in_cube = np.all(np.abs(tri_centers - cube_center[None, :]) <= half_extent, axis=1)
+        if not np.any(in_cube):
+            continue
+
+        tri_world_kept = tri_world[in_cube]
+        edge_1 = tri_world_kept[:, 1] - tri_world_kept[:, 0]
+        edge_2 = tri_world_kept[:, 2] - tri_world_kept[:, 0]
+        tri_area = 0.5 * np.linalg.norm(np.cross(edge_1, edge_2), axis=1)
+
+        kept_face_indices = np.nonzero(in_cube)[0].astype(np.int32)
+        kept_face_vidx = face_vidx[in_cube].astype(np.int32)
+        geom_name = model.geom_id2name(geom_id)
+        body_name = model.body_id2name(int(model.geom_bodyid[geom_id]))
+        text = f"{geom_name or ''} {body_name or ''}".lower()
+        is_robot_geom = any(token in text for token in ROBOT_NAME_TOKENS)
+
+        geom_ids_all.append(np.full((kept_face_indices.shape[0],), geom_id, dtype=np.int32))
+        face_idx_all.append(kept_face_indices)
+        face_vidx_all.append(kept_face_vidx)
+        tri_local_all.append(tri_local[in_cube].astype(np.float32))
+        area_all.append(tri_area.astype(np.float64))
+        is_robot_all.append(np.full((kept_face_indices.shape[0],), is_robot_geom, dtype=bool))
+
+    if len(area_all) == 0:
+        raise RuntimeError(
+            "No surface triangles found in the robot-centered crop cube. "
+            "Try increasing `--point_cube_size` or verify geom assets in environment."
+        )
+
+    return {
+        "geom_ids": np.concatenate(geom_ids_all, axis=0),
+        "face_indices": np.concatenate(face_idx_all, axis=0),
+        "face_vertex_indices": np.concatenate(face_vidx_all, axis=0),
+        "tri_local": np.concatenate(tri_local_all, axis=0),
+        "area": np.concatenate(area_all, axis=0),
+        "is_robot_face": np.concatenate(is_robot_all, axis=0),
+    }
+
+
 def _sample_point_tracks_from_mesh(
     sim,
     env,
@@ -212,7 +459,7 @@ def _sample_point_tracks_from_mesh(
       3) Store face indices + barycentric coordinates for identity-consistent tracking.
     """
     center = _get_robot_center_world(env, obs)
-    mesh_data = _collect_mesh_triangles_in_cube(sim, center, cube_size)
+    mesh_data = _collect_surface_triangles_in_cube(sim, center, cube_size)
 
     areas = mesh_data["area"]
     is_robot_face = mesh_data["is_robot_face"]

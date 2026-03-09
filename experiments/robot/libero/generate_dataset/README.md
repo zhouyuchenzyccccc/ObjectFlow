@@ -40,7 +40,7 @@ Replay original LIBERO demonstrations in simulator, then save regenerated trajec
 
 - filtering no-op actions,
 - keeping successful demos only,
-- saving Pri4R-style point tracks (`pointcloud_abs`, `pointcloud_disp`, etc.),
+- saving Pri4R-style point tracks (`pointcloud_abs`, `pointcloud_disp`, etc.) from both mesh and primitive geoms,
 - extracting semantic-temporal point-flow labels (robot vs object, moving-state changes, phase labels).
 
 ### Command
@@ -145,6 +145,7 @@ Randomly choose one complete demo from regenerated dataset and render scene poin
 - Current moving points are highlighted
 - Also saves corresponding LIBERO 2D observation video for direct comparison
 - Optional side-by-side comparison video (left: 3D point-flow, right: 2D observation)
+- A fixed right sidebar legend is rendered per frame to explicitly show semantic/group color mapping
 
 ### Command
 
@@ -214,6 +215,13 @@ In the 3D video title, you will also see:
 
 - `phase=<name>(id)`: coarse operation stage label per frame
 - `dom_group=<id>`: dominant active object group at the current frame
+
+In the 3D side legend, you will also see:
+
+- robot color swatch
+- moving-point highlight color
+- unclustered object color
+- per-group color swatches (group id to color mapping)
 
 ### Output
 
