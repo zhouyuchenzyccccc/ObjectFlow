@@ -7,6 +7,7 @@ This folder contains scripts for regenerating LIBERO HDF5 data, validating saved
 - `regenerate_libero_dataset.py`: Replay raw LIBERO demos and regenerate filtered HDF5 dataset with point tracks.
 - `inspect_regenerated_libero_points.py`: Validate `pointcloud_abs` / `pointcloud_disp` consistency and export diagnostic plots.
 - `visualize_libero_pointflow_video.py`: Randomly pick one complete demo and render scene point-flow as a video.
+- `visualize_libero_pointflow_on_original_cloud.py`: Render flow directly on saved original `pointcloud_abs` (no re-sampling by default).
 
 ## 0. Environment Preparation
 
@@ -227,6 +228,35 @@ In the 3D side legend, you will also see:
 - 2D observation video at `--output_2d_video`
 - Optional side-by-side video at `--output_comparison_video`
 - If mp4 encoding fails, script falls back to GIF and raises a message
+
+## 4. Visualize Flow on Original Saved Point Cloud
+
+### Purpose
+
+Render `pointcloud_disp` directly on the saved original point cloud `pointcloud_abs`.
+
+- By default, no re-sampling is applied (render all saved points)
+- This avoids visualization mismatch caused by extra display-time point sub-sampling
+- Optional `--max_render_points` is only for speed debugging
+
+### Command
+
+```bash
+python experiments/robot/libero/generate_dataset/visualize_libero_pointflow_on_original_cloud.py \
+  --dataset_dir /inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/datasets/libero_object_debug \
+  --output_video /inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/datasets/libero_object_debug/original_cloud_flow.mp4 \
+  --arrow_stride 8 \
+  --fps 12
+```
+
+Single-file command:
+
+```bash
+python experiments/robot/libero/generate_dataset/visualize_libero_pointflow_on_original_cloud.py \
+  --hdf5_path /inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/datasets/libero_object_debug/pick_up_the_milk_and_place_it_in_the_basket_demo.hdf5 \
+  --demo_key demo_0 \
+  --output_video /inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/datasets/libero_object_debug/original_cloud_demo0.mp4
+```
 
 ## Data Format Reference (Regenerated HDF5)
 

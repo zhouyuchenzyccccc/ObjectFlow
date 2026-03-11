@@ -60,7 +60,7 @@ pip install -r experiments/robot/libero/libero_requirements.txt
 
 Use this if you enable point backbones that require `pytorch3d` and `diffusion_policy`.
 
-
+     
 ```bash
         export PYTHONPATH=$PYTHONPATH:/inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/LIBERO 
         export PYTHONPATH=$PYTHONPATH:/inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/diffusion_policy
