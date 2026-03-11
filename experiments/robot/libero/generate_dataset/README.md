@@ -16,9 +16,7 @@ Use your `objectflow` environment and make sure LIBERO-related paths are visible
 ```bash
 export PYTHONPATH=$PYTHONPATH:/inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/LIBERO
 export PYTHONPATH=$PYTHONPATH:/inspire/hdd/project/wuliqifa/chenxinyan-240108120066/zhouyuchen/diffusion_policy
-export MUJOCO_GL=glx
-Xvfb :1 -screen 0 1920x1080x24 &
-export DISPLAY=:1
+
 
 
 ```
